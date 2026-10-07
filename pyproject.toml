@@ -1,0 +1,70 @@
+[project]
+name = "bookscan-extractor"
+version = "0.1.0"
+description = "Extract page images from scanned book PDFs, re-joining double-page spreads."
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.12"
+dependencies = [
+    "pymupdf>=1.24",
+    "opencv-python>=4.10",
+    "numpy>=2.0",
+    "pillow>=10.4",
+    "PySide6>=6.7",
+    "send2trash>=1.8",
+]
+
+[project.scripts]
+pdfextract = "pdfextract.cli:main"
+
+# A windowed launcher, generated as a GUI subsystem executable. The plain
+# pythonw.exe of a uv virtual environment is a console trampoline that starts the
+# console interpreter, so it always allocates a console; this one does not.
+[project.gui-scripts]
+pdfextract-gui = "pdfextract.ui.app:run_gui"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-qt>=4.4",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pdfextract"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pdfextract"]
+known-local-folder = ["fixture_builder"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = ["B008", "RUF046"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+ignore_missing_imports = true
+# Annotations are required of the application, not of the test bodies.
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "pdfextract.*"
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
