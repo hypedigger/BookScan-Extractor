@@ -154,7 +154,7 @@ class MainWindow(QMainWindow):
         self._batch_started: float | None = None
         self._scanner: FolderScanner | None = None
 
-        self.setWindowTitle("PDF Image Extractor")
+        self.setWindowTitle("BookScan Extractor")
         self._palette = palette_for(self.settings.theme)
         self._apply_theme()
         self._build_ui()

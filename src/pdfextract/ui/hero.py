@@ -280,7 +280,7 @@ class HeroPage(QWidget):
             )
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             header.addWidget(badge)
-        title = QLabel("PDF Image Extractor", self)
+        title = QLabel("BookScan Extractor", self)
         title.setProperty("role", "title")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle = QLabel(

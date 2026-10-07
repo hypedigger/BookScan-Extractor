@@ -3,6 +3,8 @@
 Desktop application (Windows 11) that extracts page images from scanned book PDFs and
 re-joins the double-page spreads.
 
+![BookScan Extractor](assets/screenshot.png)
+
 Three extraction modes:
 
 | Mode | Name | Behaviour |

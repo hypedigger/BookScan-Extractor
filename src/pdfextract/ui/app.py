@@ -34,7 +34,7 @@ def run_gui(argv: list[str] | None = None) -> int:
     """Start the graphical interface and return the exit code."""
     get_logger().info("application started")
     app = QApplication(argv if argv is not None else sys.argv)
-    app.setApplicationName("PDF Image Extractor")
+    app.setApplicationName("BookScan Extractor")
     app.setOrganizationName("pdf-image-extractor")
     if ICON_PATH.is_file():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
