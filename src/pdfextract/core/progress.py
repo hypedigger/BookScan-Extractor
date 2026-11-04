@@ -236,17 +236,24 @@ class BatchSummary:
     elapsed: float | None = None  # seconds, when the batch was timed
 
     @property
+    def complete(self) -> bool:
+        """Return True when every file went through without trouble."""
+        return bool(self.files_done) and not (self.files_failed or self.files_cancelled)
+
+    @property
     def headline(self) -> str:
         """One line saying how the batch went."""
-        if not self.files_done and (self.files_failed or self.files_cancelled):
-            return "Nothing was extracted"
-        return f"{_plural(self.files_done, 'file')} done"
+        if self.files_done:
+            return f"{_plural(self.files_done, 'file')} done"
+        if self.files_cancelled and not self.files_failed:
+            return "Cancelled"
+        return "Nothing was extracted"
 
     @property
     def detail(self) -> str:
         """The figures behind the headline, in plain words."""
         parts: list[str] = []
-        if self.files_done:
+        if self.images:
             what = _plural(self.images, "image") + " written"
             pieces = []
             if self.merged:
@@ -272,13 +279,18 @@ class BatchSummary:
 def summarise(jobs: Sequence[PdfJob], elapsed: float | None = None) -> BatchSummary:
     """Sum up a batch whose files have all finished."""
     done = [job for job in jobs if job.state is JobState.DONE]
+    stopped = [job for job in jobs if job.state is not JobState.DONE]
     counts = tally(done)
+    # A file stopped half way has written part of its images, and they are on disk.
+    merged_early = sum(
+        1 for job in stopped for item in job.written if item.item.kind is ItemKind.MERGED
+    )
     return BatchSummary(
         files_done=len(done),
         files_failed=sum(1 for job in jobs if job.state is JobState.FAILED),
         files_cancelled=sum(1 for job in jobs if job.state is JobState.CANCELLED),
-        images=sum(len(job.written_paths) for job in done),
-        merged=counts.merged,
+        images=sum(len(job.written_paths) for job in jobs),
+        merged=counts.merged + merged_early,
         dropped=counts.dropped,
         elapsed=elapsed,
     )

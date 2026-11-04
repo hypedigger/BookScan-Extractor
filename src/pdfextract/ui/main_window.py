@@ -31,7 +31,14 @@ from PySide6.QtWidgets import (
 from pdfextract.core import sidecar
 from pdfextract.core.applog import log_path
 from pdfextract.core.job import JobState
-from pdfextract.core.progress import batch_progress, format_duration, summarise, tally
+from pdfextract.core.progress import (
+    BatchProgress,
+    PlanTally,
+    batch_progress,
+    format_duration,
+    summarise,
+    tally,
+)
 from pdfextract.core.review_queue import ReviewBatch, ReviewQueue
 from pdfextract.core.runner import BatchRunner, PdfJob, record_decision
 from pdfextract.core.settings import AppSettings, load_settings, save_settings
@@ -40,6 +47,7 @@ from pdfextract.ui.queue_panel import QueuePanel
 from pdfextract.ui.review_window import ReviewWindow
 from pdfextract.ui.settings_dialog import edit_settings
 from pdfextract.ui.theme import palette_for, stylesheet
+from pdfextract.ui.work_page import WorkPage, WorkView
 from pdfextract.ui.workers import (
     FolderScanner,
     RunnerBridge,
@@ -51,7 +59,8 @@ MODE_LABELS = ("1 - one image per page", "2 - systematic pairing", "3 - smart pa
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ICON_PATH = PROJECT_ROOT / "assets" / "app.png"
 
-HERO_PAGE, QUEUE_PAGE = 0, 1
+HERO_PAGE, QUEUE_PAGE, WORK_PAGE = 0, 1, 2
+MAX_FILE_LINES = 8  # files listed by name on the progress screen
 
 HELP = {
     "add_files": ("Add files", "Pick one or more PDF files."),
@@ -132,6 +141,24 @@ def tip(key: str) -> str:
 # The application runs under pythonw.exe, which has no console. Any console
 # program it starts would open one of its own and flash it in the user's face.
 NO_CONSOLE = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+
+
+def _stage_text(job: PdfJob) -> str:
+    """Say what is being done to a file, with how far it has gone."""
+    done, total = job.progress
+    if job.state is JobState.PENDING:
+        return "Waiting to start"
+    if job.state is JobState.ANALYSING:
+        if not total:
+            return "Opening the file"
+        return f"Looking for the double pages   ·   page {done} of {total}"
+    if job.state in (JobState.PARTIAL_EXPORT, JobState.FINALISING):
+        if not total:
+            return "Writing the images"
+        return f"Writing the images   ·   {done} of {total}"
+    if job.state is JobState.VALIDATED:
+        return "Writing the last images"
+    return job.state.value.replace("_", " ").capitalize()
 
 
 class MainWindow(QMainWindow):
@@ -241,6 +268,11 @@ class MainWindow(QMainWindow):
         self.hero.set_start_directory(self.settings.last_directory)
         self.stack.addWidget(self.hero)
         self.stack.addWidget(self._build_queue_page())
+        self.work = WorkPage(self._palette, self)
+        self.work.cancel_requested.connect(self.cancel_batch)
+        self.work.pause_requested.connect(self.toggle_pause)
+        self.work.review_requested.connect(self.open_review)
+        self.stack.addWidget(self.work)
         self.setCentralWidget(self.stack)
 
         self.setStatusBar(QStatusBar(self))
@@ -380,6 +412,17 @@ class MainWindow(QMainWindow):
         """Switch to the list of files."""
         self.stack.setCurrentIndex(QUEUE_PAGE)
         self.toolbar.setVisible(True)
+
+    def _show_work(self) -> None:
+        """Give the whole window to the progress of the running batch."""
+        self.stack.setCurrentIndex(WORK_PAGE)
+        self.toolbar.setVisible(False)
+        self._refresh_progress()
+
+    @property
+    def on_work(self) -> bool:
+        """Return True while the progress screen is showing."""
+        return self.stack.currentIndex() == WORK_PAGE
 
     @property
     def on_hero(self) -> bool:
@@ -581,7 +624,7 @@ class MainWindow(QMainWindow):
         self._progress_timer.start()
         self._refresh_progress()
         self._refresh_start_action()
-        self.statusBar().showMessage(f"{len(paths)} file(s) started", 5000)
+        self._show_work()
 
     def _on_order_changed(self, ordered: list[Path]) -> None:
         """Follow a drag and drop, in the runner and in the table."""
@@ -643,6 +686,12 @@ class MainWindow(QMainWindow):
             force_parity=parity,
         ):
             self.panel.upsert(job)
+        self._done_shown = False
+        self.hero.clear_result()
+        if not self._progress_timer.isActive():
+            self._batch_started = time.monotonic()
+            self._progress_timer.start()
+        self._show_work()
         if parity is None:
             message = f"{path.name} queued again."
         else:
@@ -727,8 +776,10 @@ class MainWindow(QMainWindow):
         started = self._batch_started
         summary = summarise(jobs, None if started is None else time.monotonic() - started)
         root = self.settings.output.root
-        self.hero.show_result(summary.headline, summary.detail, f"In {root}" if root else "")
-        self.hero.result.open_button.setVisible(bool(summary.files_done and root))
+        self.hero.show_result(
+            summary.headline, summary.detail, f"In {root}" if root else "", summary.complete
+        )
+        self.hero.result.open_button.setVisible(bool(summary.images and root))
         if self._review_window is not None:
             self._review_window.close()
         self.statusBar().clearMessage()  # "n file(s) started" is old news by now
@@ -779,6 +830,32 @@ class MainWindow(QMainWindow):
         else:
             self.runner.pause()
             self.pause_action.setText("Resume")
+        self._refresh_progress()
+
+    def cancel_batch(self) -> None:
+        """Stop the whole batch, after asking: the analysis done so far is lost."""
+        answer = QMessageBox.question(
+            self,
+            "Cancel the batch?",
+            "Stop processing now?\n\nThe images already written stay where they are. "
+            "Pairs still waiting for a decision are given up.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if self.runner.paused:
+            self.toggle_pause()  # a paused runner would never pick the cancellation up
+        self.runner.cancel_all()
+        for job in list(self.runner.jobs):
+            if job.state is JobState.AWAITING_VALIDATION:
+                if self.queue.batch_for(job.path) is not None:
+                    self.queue.remove(job.path)
+                sidecar.forget_pending(job.path)
+                self.runner.abandon(job.path)
+        if self._review_window is not None:
+            self._review_window.close()
+        self._refresh_progress()
 
     # --------------------------------------------------------------------- events
 
@@ -832,6 +909,67 @@ class MainWindow(QMainWindow):
             self._progress_timer.stop()
             self.panel.show_all_rows()
             self._refresh_start_action()
+        self.work.show_view(self._work_view(report, counts))
+
+    def _work_view(self, report: BatchProgress, counts: PlanTally) -> WorkView:
+        """Put the state of the batch into the words of the progress screen."""
+        jobs = self.runner.jobs
+        waiting = JobState.AWAITING_VALIDATION
+        active = [job for job in jobs if not job.is_finished and job.state is not waiting]
+        view = WorkView(
+            fraction=report.fraction,
+            to_check=self.queue.pair_count(),
+            paused=self.runner.paused,
+        )
+        if active:
+            job = next((item for item in active if item.state is not JobState.PENDING), active[0])
+            view.title = job.path.name
+            view.stage = _stage_text(job)
+        elif any(job.state is waiting for job in jobs):
+            view.active = False
+            view.title = "Your turn"
+            view.stage = (
+                "Everything else is done. The last images are written once you have "
+                "decided the pairs below."
+            )
+        else:
+            view.active = False
+            view.title = "Finishing"
+        if view.paused and view.active:
+            view.stage = "Paused: no new file starts until you resume.   " + view.stage
+
+        parts = [f"{counts.single} single", f"{counts.merged} double pages"]
+        if counts.to_check:
+            parts.append(f"{counts.to_check} to check")
+        if counts.dropped:
+            parts.append(f"{counts.dropped} left out")
+        view.tally = "   ·   ".join(parts) if counts.worth_showing else ""
+
+        if view.active:
+            if report.seconds_left is not None:
+                about = "about " if report.estimated else ""
+                view.eta = f"{about}{format_duration(report.seconds_left)} left"
+            else:
+                view.eta = "estimating the time left…"
+        if report.files_total > 1:
+            view.files = f"{report.files_done} of {report.files_total} files finished"
+            symbols = {
+                JobState.DONE: "✓",
+                JobState.FAILED: "✕",
+                JobState.CANCELLED: "-",
+                JobState.PENDING: "○",
+                waiting: "?",
+            }
+            for job in jobs[:MAX_FILE_LINES]:
+                line = f"{symbols.get(job.state, '●')}  {job.path.name}"
+                if job.state is waiting:
+                    line += "   ·   waiting for you"
+                elif not job.is_finished and job.state is not JobState.PENDING:
+                    line += "   ·   " + _stage_text(job).split("   ·   ")[-1]
+                view.file_lines.append(line)
+            if len(jobs) > MAX_FILE_LINES:
+                view.file_lines.append(f"and {len(jobs) - MAX_FILE_LINES} more")
+        return view
 
     def _on_queue_changed(self, queue: ReviewQueue) -> None:
         """Refresh the validation indicator and announce the first batch."""
@@ -843,6 +981,7 @@ class MainWindow(QMainWindow):
             self._announce(f"{summary}. Click the button at the bottom left to start.")
         if self._review_window is not None:
             self._review_window.reload_entries()
+        self._refresh_progress()
         self._maybe_show_done()
 
     def _announce(self, message: str) -> None:

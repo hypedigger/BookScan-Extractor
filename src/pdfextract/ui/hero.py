@@ -234,20 +234,14 @@ class ResultCard(QFrame):
 
     def __init__(self, palette: Palette, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._palette = palette
         self.setObjectName("result")
-        self.setStyleSheet(
-            f"QFrame#result {{ background: {palette.surface_raised};"
-            f" border: 1px solid {palette.success}; border-radius: {RADIUS + 4}px; }}"
-        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 16, 22, 16)
         layout.setSpacing(6)
 
         self.headline = QLabel("", self)
-        self.headline.setStyleSheet(
-            f"font-size: {FONT_SIZE + 4}px; font-weight: 600; color: {palette.success};"
-            " background: transparent;"
-        )
+        self.set_tone(success=True)
         self.detail = QLabel("", self)
         self.detail.setWordWrap(True)
         self.detail.setStyleSheet(
@@ -274,6 +268,18 @@ class ResultCard(QFrame):
         layout.addWidget(self.where)
         layout.addSpacing(4)
         layout.addLayout(buttons)
+
+    def set_tone(self, success: bool) -> None:
+        """Green for a batch that went through, amber for one stopped or failed."""
+        colour = self._palette.success if success else self._palette.warning
+        self.setStyleSheet(
+            f"QFrame#result {{ background: {self._palette.surface_raised};"
+            f" border: 1px solid {colour}; border-radius: {RADIUS + 4}px; }}"
+        )
+        self.headline.setStyleSheet(
+            f"font-size: {FONT_SIZE + 4}px; font-weight: 600; color: {colour};"
+            " background: transparent;"
+        )
 
 
 class HeroPage(QWidget):
@@ -448,9 +454,12 @@ class HeroPage(QWidget):
         if folders:
             self.folders_chosen.emit(folders)
 
-    def show_result(self, headline: str, detail: str, where: str = "") -> None:
+    def show_result(
+        self, headline: str, detail: str, where: str = "", success: bool = True
+    ) -> None:
         """Put the outcome of the last batch on top, and invite the next one."""
-        self.result.headline.setText(f"✓  {headline}")
+        self.result.set_tone(success)
+        self.result.headline.setText(f"{'✓' if success else '■'}  {headline}")
         self.result.detail.setText(detail)
         self.result.where.setText(where)
         self.result.where.setVisible(bool(where))

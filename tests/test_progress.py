@@ -271,7 +271,23 @@ def test_the_outcome_mentions_what_went_wrong():
     assert summary.detail == "1 image written. 1 file failed."
 
 
-def test_nothing_extracted_is_said_plainly():
+def test_a_cancelled_batch_says_so():
     summary = summarise([_job("c.pdf", state=JobState.CANCELLED)])
-    assert summary.headline == "Nothing was extracted"
+    assert summary.headline == "Cancelled"
     assert summary.detail == "1 file cancelled."
+    assert not summary.complete
+
+
+def test_a_cancelled_book_still_counts_the_images_it_wrote():
+    stopped = _done_book("d.pdf", 3, 1)
+    stopped.state = JobState.CANCELLED
+    summary = summarise([stopped])
+    assert summary.images == 4
+    assert summary.merged == 1
+    assert summary.detail.startswith("4 images written")
+
+
+def test_nothing_extracted_is_said_plainly():
+    summary = summarise([_job("c.pdf", state=JobState.FAILED)])
+    assert summary.headline == "Nothing was extracted"
+    assert summary.detail == "1 file failed."

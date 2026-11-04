@@ -443,6 +443,23 @@ class BatchRunner:
                     job.state = JobState.CANCELLED
                     self._notify(job)
 
+    def abandon(self, path: Path) -> list[PdfJob]:
+        """Mark a book waiting for decisions as cancelled, and return its jobs.
+
+        Nothing is running for such a book, so there is nothing to interrupt: its
+        pending pairs are simply given up. The images already written stay.
+        """
+        with self._condition:
+            jobs = [
+                job for job in self.jobs
+                if job.path == path and job.state is JobState.AWAITING_VALIDATION
+            ]
+            for job in jobs:
+                job.state = JobState.CANCELLED
+        for job in jobs:
+            self._notify(job)
+        return jobs
+
     def forget(self, path: Path) -> list[PdfJob]:
         """Drop the jobs of a file that are no longer running, and return them.
 

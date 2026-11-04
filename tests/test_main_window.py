@@ -239,8 +239,11 @@ def test_the_progress_strip_reports_the_batch(qtbot, window, folder):
     window.show()
     window._stage(sorted(folder.glob("*.pdf")), source_root=folder)
     window.start_selected()
-    assert window.progress_strip.isVisible()
+    # The strip lives on the file list, which the progress screen replaces while the
+    # batch runs: it is kept up to date for when the user goes back to the list.
+    assert not window.progress_strip.isHidden()
     assert "file(s)" in window.batch_label.text()
+    assert window.work.files.text().endswith("files finished")
 
     qtbot.waitUntil(
         lambda: bool(window.runner.jobs)
@@ -513,3 +516,68 @@ def test_the_outcome_waits_for_the_decisions(qtbot, window, folder, no_file_mana
     assert window.on_hero
     assert "1 file done" in window.hero.result.headline.text()
     assert "double page" in window.hero.result.detail.text()
+
+
+# --- the progress screen ------------------------------------------------------
+
+
+def _slow_book(tmp_path) -> Path:
+    pages = [make_text_page(seed=901)]
+    for index in range(30):
+        pages += list(spread_pages(seed=2 + index % 5))
+    return build_pdf(tmp_path / "slow.pdf", pages, dpi=150)
+
+
+def test_a_running_batch_takes_the_whole_window(qtbot, window, tmp_path):
+    window.show()
+    window.settings.mode = 3
+    window._stage([_slow_book(tmp_path)], source_root=None)
+    window.start_selected()
+    assert window.on_work
+    assert not window.panel.isVisible()  # the table is not shown behind
+    assert not window.toolbar.isVisible()
+    assert window.work.ring.animating
+    qtbot.waitUntil(lambda: "page" in window.work.stage.text(), timeout=30000)
+    assert window.work.title.text() == "slow.pdf"
+    assert window.work.cancel_button.isVisible()
+    window.runner.cancel_all()
+
+
+def test_cancel_stops_the_batch_after_asking(qtbot, window, tmp_path, monkeypatch):
+    window.show()
+    window.settings.mode = 3
+    window._stage([_slow_book(tmp_path)], source_root=None)
+    window.start_selected()
+    qtbot.waitUntil(lambda: window.runner.jobs[0].state is JobState.ANALYSING, timeout=30000)
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+    window.work.cancel_button.click()
+    qtbot.wait(200)
+    assert not window.runner.jobs[0].is_finished  # "No" leaves it running
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    window.work.cancel_button.click()
+    qtbot.waitUntil(lambda: window.hero.showing_result, timeout=10000)
+    assert window.runner.jobs[0].state is JobState.CANCELLED
+    assert window.on_hero
+    assert "Cancelled" in window.hero.result.headline.text()
+    assert not window.work.ring.animating
+
+
+def test_cancel_gives_up_the_pairs_waiting_for_a_decision(qtbot, window, folder, monkeypatch):
+    window.show()
+    window.settings.mode = 3
+    window.settings.seam.merge_evidence = 99.0
+    window.settings.seam.split_evidence = -99.0
+    window._stage(sorted(folder.glob("*.pdf"))[:1], source_root=folder)
+    window.start_selected()
+    qtbot.waitUntil(lambda: not window.queue.is_empty(), timeout=60000)
+    qtbot.waitUntil(lambda: window.work.title.text() == "Your turn", timeout=10000)
+    assert window.work.review_button.isVisible()
+    assert "Check" in window.work.review_button.text()
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    window.work.cancel_button.click()
+    qtbot.waitUntil(lambda: window.hero.showing_result, timeout=10000)
+    assert window.queue.is_empty()
+    assert window.runner.jobs[0].state is JobState.CANCELLED

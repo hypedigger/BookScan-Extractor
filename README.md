@@ -40,6 +40,8 @@ stay in the list for later, or can be removed from it. The mode can be set globa
 or overridden file by file, and a right click offers to run a file again, optionally
 imposing where the mode 2 pairing starts.
 
+While a batch runs, the whole window shows its progress: a ring with the percentage, the file and the page being worked on, the time left, the state of each file, and buttons to check the pairs already waiting, pause or cancel.
+
 The validation screen closes by itself once the last pair is decided. When every
 file is processed and decided, the window returns to its start screen with the
 outcome on top (files done, images written, double pages joined, pages left out),
