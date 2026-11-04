@@ -358,7 +358,7 @@ class ReviewWindow(QMainWindow):
         remaining = len(self.entries)
         self.header.setText(
             f"{entry.pdf_path.name}    pages {entry.page_start}-{entry.page_end}"
-            f"    {self.position + 1} / {remaining}    continuity {entry.score:.2f}"
+            f"    {self.position + 1} / {remaining}    spread {entry.score:.0%} likely"
         )
         if self.settings.debug_metrics:
             self.metrics_label.setText(

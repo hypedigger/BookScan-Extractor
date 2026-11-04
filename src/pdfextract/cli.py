@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from itertools import pairwise
 from pathlib import Path
 
 from pdfextract.core import naming
@@ -144,79 +143,62 @@ def _progress(label: str, done: int, total: int) -> None:
         print(file=sys.stderr)
 
 
-HISTOGRAM_BUCKETS = 20
+EVIDENCE_RANGE = (-8, 10)  # one bucket per unit of evidence
 
 
 def command_calibrate(args: argparse.Namespace) -> int:
-    """Show the distribution of the continuity scores of whole books.
+    """Show the distribution of the spread evidence of whole books.
 
-    The default thresholds are a starting point, nothing more. On real files the
-    two populations, spreads and unrelated pages, separate into two clusters with a
-    gap between them; this prints that distribution and proposes thresholds placed
-    inside the gap.
+    Every adjacent pair gets an evidence, the log-odds that it is one spread. Pairs
+    ruled out at once (blank page, framed picture or light margin along the gutter)
+    are counted apart. The thresholds of the settings are drawn on the histogram, so
+    one can see how many pairs fall in the grey zone that turns into questions.
     """
     from pdfextract.core.pairing import iter_pair_scores
 
     settings = load_settings(args.settings)
     settings.mode = 3
     scores: list[tuple[str, int, float, str]] = []
+    vetoed = 0
     for raw in args.paths:
         for path in iter_pdf_files(Path(raw).expanduser(), recursive=args.recursive):
             try:
                 with PdfDocument(path, args.password) as document:
                     for index, score in enumerate(iter_pair_scores(document, settings)):
-                        scores.append((path.name, index + 1, score.value, score.confidence))
+                        if score.veto is not None:
+                            vetoed += 1
+                            continue
+                        scores.append((path.name, index + 1, score.evidence, score.confidence))
             except PdfDocumentError as exc:
                 print(f"{path.name}: {exc}", file=sys.stderr)
-    if not scores:
+    if not scores and not vetoed:
         print("no score to report", file=sys.stderr)
         return 2
 
-    values = sorted(value for _, _, value, _ in scores)
-    print(f"\n{len(values)} pair(s) scored\n")
-    counts = [0] * HISTOGRAM_BUCKETS
-    for value in values:
-        counts[min(HISTOGRAM_BUCKETS - 1, int(value * HISTOGRAM_BUCKETS))] += 1
-    widest = max(counts) or 1
+    low, high = EVIDENCE_RANGE
+    print(f"\n{len(scores) + vetoed} pair(s) scored, {vetoed} ruled out at once\n")
+    counts = [0] * (high - low)
+    for _, _, value, _ in scores:
+        counts[min(high - low - 1, max(0, int(value) - low))] += 1
+    widest = max(counts, default=0) or 1
+    merge_at, split_at = settings.seam.merge_evidence, settings.seam.split_evidence
     for bucket, count in enumerate(counts):
-        low = bucket / HISTOGRAM_BUCKETS
+        start = low + bucket
         bar = "#" * int(round(40 * count / widest))
-        print(f"  {low:.2f}-{low + 1 / HISTOGRAM_BUCKETS:.2f} {count:>4} {bar}")
-
-    gap_start, gap_end = _widest_gap(values)
-    print(f"\nWidest gap in the distribution: {gap_start:.3f} to {gap_end:.3f}")
-    if gap_end - gap_start > 0.05:
-        merge = round(gap_start + 0.75 * (gap_end - gap_start), 2)
-        split = round(gap_start + 0.25 * (gap_end - gap_start), 2)
-        print(f"Suggested thresholds: threshold_merge = {merge}, threshold_split = {split}")
-        print(
-            f"Current settings:     threshold_merge = {settings.seam.threshold_merge}, "
-            f"threshold_split = {settings.seam.threshold_split}"
-        )
-    else:
-        print(
-            "The two populations do not separate cleanly. Look at the pairs around the "
-            "middle of the range with tools/score_report.py --plate before changing the "
-            "weights."
-        )
+        mark = " <- merge" if start <= merge_at < start + 1 else ""
+        mark += " <- split" if start <= split_at < start + 1 else ""
+        print(f"  {start:+3d} to {start + 1:+3d} {count:>4} {bar}{mark}")
+    print(
+        f"\nThresholds:merge_evidence = {merge_at}, split_evidence = {split_at}. "
+        "The parity of the book shifts every pair before they apply."
+    )
 
     if args.list_uncertain:
-        print("\nPairs in the grey zone with the current thresholds:")
+        print("\nPairs in the grey zone, before the parity prior:")
         for name, index, value, confidence in scores:
             if confidence == "uncertain":
-                print(f"  {name} pages {index}-{index + 1}: {value:.3f}")
+                print(f"  {name} pages {index}-{index + 1}: {value:+.2f}")
     return 0
-
-
-def _widest_gap(values: list[float]) -> tuple[float, float]:
-    """Return the widest empty interval between two consecutive scores."""
-    if len(values) < 2:
-        return 0.0, 0.0
-    best = (0.0, 0.0)
-    for lower, upper in pairwise(values):
-        if upper - lower > best[1] - best[0]:
-            best = (lower, upper)
-    return best
 
 
 def command_settings(args: argparse.Namespace) -> int:

@@ -39,8 +39,8 @@ def _settings(tmp_path: Path, mode: int = 3, everything_uncertain: bool = False)
     if everything_uncertain:
         # Force every pair into the grey zone, which is the situation the whole
         # partial export machinery exists for.
-        settings.seam.threshold_merge = 0.99
-        settings.seam.threshold_split = 0.01
+        settings.seam.merge_evidence = 99.0
+        settings.seam.split_evidence = -99.0
     return settings
 
 

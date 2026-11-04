@@ -23,8 +23,8 @@ def _settings(tmp_path: Path) -> AppSettings:
     settings = AppSettings()
     settings.mode = 3
     settings.output.root = str(tmp_path / "out")
-    settings.seam.threshold_merge = 0.99  # force every pair into the grey zone
-    settings.seam.threshold_split = 0.01
+    settings.seam.merge_evidence = 99.0  # force every pair into the grey zone
+    settings.seam.split_evidence = -99.0
     settings.review.preload_ahead = 2
     settings.review.cache_mb = 64
     return settings

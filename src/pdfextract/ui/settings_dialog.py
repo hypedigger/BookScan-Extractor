@@ -53,9 +53,12 @@ CHOICES = {
 }
 
 HELP = {
-    "threshold_merge": "At or above this score a pair is merged without asking.",
-    "threshold_split": "At or below this score a pair is split without asking.",
-    "cost_single": "Prior for exporting a page on its own; a pair wins above this score.",
+    "merge_evidence": "Log-odds at or above which a pair is merged without asking.",
+    "split_evidence": "Log-odds at or below which a pair is kept apart without asking.",
+    "parity_evidence": "A pair this likely counts as a witness of the parity of the book.",
+    "parity_min_pairs": "Witnesses needed before the parity of the book is trusted.",
+    "parity_bonus": "Evidence added to the pairs on the parity of the book.",
+    "parity_penalty": "Evidence taken from the pairs on the other parity.",
     "gutter_skip_ratio": "Fraction of the page width ignored along the gutter.",
     "preload_ahead": "Pairs decoded ahead of the one on screen.",
     "template": "Tokens: " + ", ".join(sorted(f"{{{name}}}" for name in naming.KNOWN_TOKENS)),
@@ -77,7 +80,6 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Settings")
         self.settings = copy.deepcopy(settings)
         self._widgets: dict[tuple[str, str], QWidget] = {}
-        self._weight_widgets: dict[str, QDoubleSpinBox] = {}
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget(self)
@@ -110,17 +112,6 @@ class SettingsDialog(QDialog):
 
         for field in fields(config):
             value = getattr(config, field.name)
-            if field.name == "weights":
-                form.addRow(QLabel("<b>Metric weights</b>", inner))
-                for key, weight in sorted(value.items()):
-                    spin = QDoubleSpinBox(inner)
-                    spin.setRange(0.0, 1.0)
-                    spin.setSingleStep(0.01)
-                    spin.setDecimals(3)
-                    spin.setValue(float(weight))
-                    self._weight_widgets[key] = spin
-                    form.addRow(_label_for(key), spin)
-                continue
             widget = self._widget_for(field.name, value, inner)
             if widget is None:
                 continue
@@ -151,7 +142,7 @@ class SettingsDialog(QDialog):
             return integer
         if isinstance(value, float):
             decimal = QDoubleSpinBox(parent)
-            decimal.setRange(0.0, 10_000.0)
+            decimal.setRange(-10_000.0, 10_000.0)
             decimal.setDecimals(3)
             decimal.setSingleStep(0.01)
             decimal.setValue(value)
@@ -261,8 +252,6 @@ class SettingsDialog(QDialog):
             config = getattr(self.settings, attribute)
             if is_dataclass(config):
                 self._read_into(config, attribute)
-        for key, spin in self._weight_widgets.items():
-            self.settings.seam.weights[key] = float(spin.value())
         self.settings.active_profile = self.profile_combo.currentData() or ""
         self.settings.debug_metrics = self.debug.isChecked()
         return self.settings

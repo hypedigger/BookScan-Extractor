@@ -47,31 +47,26 @@ class SeamConfig:
     scale_tolerance: float = 0.02
     trim_scan_border: bool = True
     border_trim_max_ratio: float = 0.05
-    threshold_merge: float = 0.72
-    threshold_split: float = 0.45
+    # Thresholds on the evidence (log-odds) of spread.py, after the parity prior.
+    merge_evidence: float = 4.0  # merged without asking at or above
+    split_evidence: float = -1.0  # kept apart without asking at or below
     geometry_tolerance: float = 0.06
-    veto_cap: float = 0.30
     detrend_window: int = 25
     offset_penalty: float = 0.04
     flat_band_threshold: float = 1.5
     edge_tolerance_ratio: float = 0.6
-    weights: dict[str, float] = field(
-        default_factory=lambda: {
-            "row_correlation": 0.34,
-            "colour_histogram": 0.16,
-            "gradient_jump": 0.20,
-            "edge_continuity": 0.14,
-            "content_type": 0.10,
-            "geometry": 0.06,
-        }
-    )
 
 
 @dataclass
 class PairingConfig:
     """Global pairing decision parameters (modes 2 and 3)."""
 
-    cost_single: float = 0.55
+    # Spreads keep the parity of a book: once enough likely spreads agree on one,
+    # pairs on that parity gain evidence and pairs on the other lose a lot of it.
+    parity_evidence: float = 2.0  # a pair this likely counts as a parity witness
+    parity_min_pairs: int = 3  # witnesses needed before the parity is trusted
+    parity_bonus: float = 2.0
+    parity_penalty: float = 5.0
     mode2_report_confidence: bool = True
 
 

@@ -429,8 +429,8 @@ def test_a_book_waiting_for_decisions_can_be_removed_for_good(qtbot, window, fol
     from pdfextract.core import sidecar
 
     window.settings.mode = 3
-    window.settings.seam.threshold_merge = 0.99
-    window.settings.seam.threshold_split = 0.01
+    window.settings.seam.merge_evidence = 99.0
+    window.settings.seam.split_evidence = -99.0
     window._stage(sorted(folder.glob("*.pdf"))[:1], source_root=folder)
     window.start_selected()
     qtbot.waitUntil(lambda: not window.queue.is_empty(), timeout=60000)

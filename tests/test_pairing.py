@@ -193,3 +193,59 @@ def test_the_expected_file_count_follows_the_drops():
                    proposed="merge", decision="drop_both")
     ]
     assert plan.expected_file_count() == 1  # page 1 only
+
+
+# --- book level reasoning, on evidences given directly ------------------------
+
+from pdfextract.core.pairing import apply_parity, best_arrangement, book_parity  # noqa: E402
+from pdfextract.core.settings import PairingConfig  # noqa: E402
+from pdfextract.core.spread import IMPOSSIBLE  # noqa: E402
+
+PAIRING = PairingConfig()
+
+
+def test_the_parity_needs_several_witnesses_that_agree():
+    # pair indices 1, 3 and 5 look like spreads: pages 2-3, 4-5, 6-7
+    evidences = [-3.0, 3.0, -2.0, 2.5, -1.0, 2.2, 0.0, 1.0]
+    assert book_parity(evidences, PAIRING) == 1
+    assert book_parity(evidences[:4], PAIRING) is None  # only two witnesses
+    mixed = [3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
+    assert book_parity(mixed, PAIRING) is None  # both parities as likely
+
+
+def test_the_parity_lifts_one_side_and_sinks_the_other():
+    evidences = [IMPOSSIBLE, 3.0, 1.0, 2.5, 1.0, 2.2]
+    adjusted, parity = apply_parity(evidences, PAIRING)
+    assert parity == 1
+    assert adjusted[0] == IMPOSSIBLE  # an impossible pair stays impossible
+    assert adjusted[1] == pytest.approx(3.0 + PAIRING.parity_bonus)
+    assert adjusted[2] == pytest.approx(1.0 - PAIRING.parity_penalty)
+
+
+def test_the_best_arrangement_never_reuses_a_page():
+    # pairs 0 (pages 1-2) and 1 (pages 2-3) compete for page 2: the stronger wins
+    assert best_arrangement([1.0, 3.0, -1.0, 2.0]) == {1, 3}
+    assert best_arrangement([-1.0, -2.0, -3.0]) == set()
+
+
+def test_no_question_about_a_pair_that_reuses_a_settled_page(monkeypatch):
+    """A sure merge settles its pages: a weak pair overlapping it is no question."""
+    from pdfextract.core import pairing
+    from pdfextract.core.seam import SeamScore
+
+    evidences = [IMPOSSIBLE, 6.0, 1.0, IMPOSSIBLE, 0.5, -0.5, IMPOSSIBLE]
+    scores = [
+        SeamScore(value=0.5, vertical_offset=0, evidence=value) for value in evidences
+    ]
+
+    class _Document:
+        page_count = len(evidences) + 1
+
+    settings = AppSettings()
+    settings.mode = 3
+    plan = pairing._mode3_plan(_Document(), scores, settings)  # type: ignore[arg-type]
+    merged = {item.pages for item in plan.items if item.kind is ItemKind.MERGED}
+    assert (2, 3) in merged
+    asked = {(pair.page_start, pair.page_end) for pair in plan.review}
+    assert (3, 4) not in asked  # page 3 already belongs to a sure spread
+    assert (5, 6) in asked and (6, 7) not in asked  # one question for pages 5 to 7

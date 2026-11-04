@@ -1,7 +1,7 @@
 """Seam scoring debug tool.
 
 Prints the score of every adjacent pair of a PDF with the detail of each metric, so
-the weights and thresholds can be calibrated on real files. With ``--plate`` it also
+the evidence thresholds can be calibrated on real files. With ``--plate`` it also
 writes a contact sheet showing each join, which is the fastest way to see where the
 scorer is wrong.
 
@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     label = f"{index}-{index + 1}"
                     print(
-                        f"{label:>12} {score.value:>6.3f} {score.vertical_offset:>5} "
+                        f"{label:>12} {score.evidence:>+7.2f} {score.vertical_offset:>5} "
                         f"{score.confidence:>10}  {metrics}"
                     )
                     if args.plate is not None:
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
                             _thumbnail(
                                 previous,
                                 current,
-                                f"{path.stem} {label}  score={score.value:.3f} "
+                                f"{path.stem} {label}  evidence={score.evidence:+.2f} "
                                 f"dy={score.vertical_offset} {score.confidence}",
                             )
                         )

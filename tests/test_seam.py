@@ -6,10 +6,12 @@ no value.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from pdfextract.core.seam import MERGE, SPLIT, score_seam
 from pdfextract.core.settings import SeamConfig
+from pdfextract.core.spread import IMPOSSIBLE
 
 from fixture_builder import make_text_page, spread_pages, unrelated_pages
 
@@ -31,7 +33,7 @@ def test_continuous_pairs_score_above_merge_threshold(defects, seed):
     """Two halves of one image must score high enough to be merged unattended."""
     left, right = spread_pages(seed=seed, **defects)
     score = score_seam(left, right, CONFIG)
-    assert score.value > CONFIG.threshold_merge, score.metrics
+    assert score.evidence >= CONFIG.merge_evidence, score.metrics
     assert score.confidence == MERGE
 
 
@@ -40,7 +42,7 @@ def test_unrelated_pairs_score_below_split_threshold(seed):
     """A text page facing a photograph must be split unattended."""
     left, right = unrelated_pages(seed=seed)
     score = score_seam(left, right, CONFIG)
-    assert score.value < CONFIG.threshold_split, score.metrics
+    assert score.evidence <= CONFIG.split_evidence, score.metrics
     assert score.confidence == SPLIT
 
 
@@ -94,7 +96,8 @@ def test_geometry_mismatch_vetoes_the_pair():
     left, right = spread_pages(seed=3)
     narrow = right[:, : right.shape[1] // 2]
     score = score_seam(left, narrow, CONFIG)
-    assert score.value <= CONFIG.veto_cap
+    assert score.evidence == IMPOSSIBLE
+    assert score.veto is not None
     assert score.metrics.get("veto") == 1.0
 
 
@@ -104,4 +107,46 @@ def test_metrics_are_reported_for_debugging():
     score = score_seam(left, right, CONFIG)
     assert "row_correlation" in score.metrics
     assert "gradient_jump" in score.metrics
+    assert "evidence" in score.metrics
     assert 0.0 <= score.value <= 1.0
+
+
+def _framed(image: np.ndarray, side: str, margin: int = 60) -> np.ndarray:
+    """Put a white margin with a straight edge along the gutter side of a page."""
+    framed = image.copy()
+    if side == "left":  # the gutter of a left page is on its right
+        framed[:, -margin:] = 245
+    else:
+        framed[:, :margin] = 245
+    return framed
+
+
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_a_framed_print_cannot_be_half_of_a_spread(side):
+    """A picture that stops on a light margin with a straight edge is a whole picture.
+
+    Real photo books are full of them, facing each other, and the old scorer asked
+    about every one: whatever the rest of the pair looks like, it is ruled out.
+    """
+    left, right = spread_pages(seed=3)
+    if side == "left":
+        left = _framed(left, "left")
+    else:
+        right = _framed(right, "right")
+    score = score_seam(left, right, CONFIG)
+    assert score.evidence == IMPOSSIBLE, score.metrics
+    assert score.confidence == SPLIT
+    assert score.veto is not None
+
+
+def test_a_blank_page_cannot_be_half_of_a_spread():
+    left = spread_pages(seed=3)[0]
+    blank = np.full_like(left, 250)
+    score = score_seam(left, blank, CONFIG)
+    assert score.veto == "blank page"
+
+
+def test_the_value_is_the_probability_of_the_evidence():
+    score = score_seam(*spread_pages(seed=2), CONFIG)
+    assert score.value > 0.95
+    assert score.evidence > 0

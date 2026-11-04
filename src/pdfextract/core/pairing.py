@@ -13,8 +13,9 @@ from collections.abc import Callable, Iterator
 from pdfextract.core.document import PdfDocument
 from pdfextract.core.extractor import analysis_array, output_height
 from pdfextract.core.job import ExtractionPlan, ItemKind, PlanItem, ReviewPair
-from pdfextract.core.seam import UNCERTAIN, SeamScore, score_seam
-from pdfextract.core.settings import AppSettings
+from pdfextract.core.seam import SeamScore, score_seam
+from pdfextract.core.settings import AppSettings, PairingConfig
+from pdfextract.core.spread import IMPOSSIBLE, probability
 
 ScoreCallback = Callable[[int, int, SeamScore], None]
 
@@ -44,6 +45,8 @@ def iter_pair_scores(
                 vertical_offset=int(round(score.vertical_offset * scale)),
                 metrics=score.metrics,
                 confidence=score.confidence,
+                evidence=score.evidence,
+                veto=score.veto,
             )
             if progress is not None:
                 progress(previous_index + 1, total, score)
@@ -120,7 +123,7 @@ def _mode2_plan(
         for item in plan.items
         if item.kind is ItemKind.MERGED
         and item.score is not None
-        and item.score <= settings.seam.threshold_split
+        and item.score <= probability(settings.seam.split_evidence)
     ]
     if weak:
         listed = ", ".join(str(page) for page in weak[:10])
@@ -145,79 +148,135 @@ def plan_with_parity(
     return plan
 
 
+def book_parity(evidences: list[float], config: PairingConfig) -> int | None:
+    """Return the parity of the pair indices that hold the spreads, if it is clear.
+
+    A book is laid out so that a spread always sits on the same two facing pages:
+    once the left page of a spread is an even page, it is so throughout the book,
+    give or take a local shift. Witnesses are the pairs that look like spreads on
+    their own; the parity is only trusted when enough of them agree and the other
+    parity has clearly fewer.
+    """
+    witnesses = [0, 0]
+    for index, value in enumerate(evidences):
+        if value >= config.parity_evidence:
+            witnesses[index % 2] += 1
+    best = 0 if witnesses[0] >= witnesses[1] else 1
+    if witnesses[best] >= config.parity_min_pairs and witnesses[best] >= 3 * witnesses[1 - best]:
+        return best
+    return None
+
+
+def apply_parity(evidences: list[float], config: PairingConfig) -> tuple[list[float], int | None]:
+    """Shift every evidence by the parity prior of the book, when there is one."""
+    parity = book_parity(evidences, config)
+    if parity is None:
+        return list(evidences), None
+    adjusted = [
+        value
+        if value <= IMPOSSIBLE
+        else value + (config.parity_bonus if index % 2 == parity else -config.parity_penalty)
+        for index, value in enumerate(evidences)
+    ]
+    return adjusted, parity
+
+
+def best_arrangement(evidences: list[float]) -> set[int]:
+    """Return the pair indices of the most likely arrangement of the whole book.
+
+    ``best[n]`` is the total evidence of the best arrangement of the first ``n``
+    pages, a lone page counting for nothing and a pair for its evidence. Taking a
+    pair only when that beats leaving its pages alone, over the whole sequence,
+    guarantees that no page ends up in two pairs.
+    """
+    page_count = len(evidences) + 1
+    best = [0.0] * (page_count + 1)
+    paired = [False] * (page_count + 1)
+    for count in range(2, page_count + 1):
+        candidate = best[count - 2] + evidences[count - 2]
+        if candidate > best[count - 1]:
+            best[count], paired[count] = candidate, True
+        else:
+            best[count] = best[count - 1]
+    chosen: set[int] = set()
+    cursor = page_count
+    while cursor >= 2:
+        if paired[cursor]:
+            chosen.add(cursor - 2)
+            cursor -= 2
+        else:
+            cursor -= 1
+    return chosen
+
+
 def _mode3_plan(
     document: PdfDocument, scores: list[SeamScore], settings: AppSettings
 ) -> ExtractionPlan:
-    """Build the smart plan with a dynamic programme over the page sequence.
+    """Build the smart plan: merge what is sure, ask only about what is not.
 
-    ``best[i]`` is the value of the best arrangement of the first ``i`` pages. A
-    page can either be exported on its own, for a constant prior, or merged with the
-    page before it, for the value of their seam score. Back-tracking gives the
-    globally optimal arrangement, which guarantees that no page ends up in two pairs.
-
-    A pair accounts for two pages, so its seam score is counted twice before being
-    weighed against the two single page priors it replaces. Comparing a score, which
-    never exceeds one, with a single prior would make pairing impossible as soon as
-    the prior went above one half. With this normalisation ``cost_single`` reads
-    exactly as intended: a pair is merged when its score beats that value.
+    The evidence of every pair is first corrected by the parity of the book, then
+    the best arrangement of the whole book is chosen. Pairs of that arrangement at
+    or above the merge threshold are merged without asking; their pages are then
+    settled, so no question is asked about a pair that would reuse one of them.
+    Everything between the two thresholds becomes a question, with the arrangement
+    as the proposed answer.
     """
     page_count = document.page_count
-    cost_single = settings.pairing.cost_single
+    merge_at = settings.seam.merge_evidence
+    split_at = settings.seam.split_evidence
+    evidences, parity = apply_parity([score.evidence for score in scores], settings.pairing)
+    chosen = best_arrangement(evidences)
 
-    best = [0.0] * (page_count + 1)
-    merged_here = [False] * (page_count + 1)
-    for count in range(1, page_count + 1):
-        single = best[count - 1] + cost_single
-        take_single = True
-        value = single
-        if count >= 2:
-            pair = best[count - 2] + 2.0 * scores[count - 2].value
-            if pair > single:
-                value, take_single = pair, False
-        best[count] = value
-        merged_here[count] = not take_single
+    sure = {index for index in chosen if evidences[index] >= merge_at}
+    settled = {page for index in sure for page in (index + 1, index + 2)}
 
-    arrangement: list[PlanItem] = []
-    review: list[ReviewPair] = []
-    cursor = page_count
-    while cursor > 0:
-        if merged_here[cursor]:
-            score = scores[cursor - 2]
-            arrangement.append(
+    plan = ExtractionPlan(mode=3)
+    cursor = 1
+    while cursor <= page_count:
+        index = cursor - 1
+        if index in chosen:
+            score = scores[index]
+            plan.items.append(
                 PlanItem(
-                    page_start=cursor - 1,
-                    page_end=cursor,
+                    page_start=cursor,
+                    page_end=cursor + 1,
                     kind=ItemKind.MERGED,
                     vertical_offset=score.vertical_offset,
-                    score=score.value,
-                    uncertain=score.confidence == UNCERTAIN,
+                    score=probability(evidences[index]),
+                    uncertain=index not in sure,
                 )
             )
-            if score.confidence == UNCERTAIN:
-                review.append(_review_pair(cursor - 1, score, proposed="merge"))
-            cursor -= 2
+            if index not in sure:
+                plan.review.append(
+                    _review_pair(cursor, score, evidences[index], proposed="merge")
+                )
+            cursor += 2
         else:
-            arrangement.append(PlanItem(page_start=cursor))
-            cursor -= 1
-    arrangement.reverse()
-    review.reverse()
+            plan.items.append(PlanItem(page_start=cursor))
+            cursor += 1
 
-    plan = ExtractionPlan(mode=3, items=arrangement, review=review)
-
-    # Pairs the programme turned down by a small margin deserve a look too: the
-    # user may well see a spread where the score was not quite convincing.
-    retained = {(item.page_start, item.page_end) for item in arrangement}
-    claimed = _pages_of(plan.review)
+    claimed = settled | _pages_of(plan.review)
     for index, score in enumerate(scores):
         pages = (index + 1, index + 2)
-        if pages in retained or score.confidence != UNCERTAIN:
+        if index in chosen or not split_at < evidences[index] < merge_at:
             continue
         if claimed & set(pages):
-            continue
-        plan.review.append(_review_pair(pages[0], score, proposed="split"))
+            continue  # a page already settled or already asked about
+        plan.review.append(_review_pair(pages[0], score, evidences[index], proposed="split"))
         claimed.update(pages)
     plan.review.sort(key=lambda pair: pair.page_start)
     _mark_uncertain_items(plan)
+
+    asked = len(plan.review)
+    vetoed = sum(1 for score in scores if score.veto is not None)
+    if parity is not None:
+        plan.notes.append(
+            f"Spreads start on {'odd' if parity == 0 else 'even'} pages in this book."
+        )
+    plan.notes.append(
+        f"{len(sure)} spread(s) merged, {asked} question(s), "
+        f"{vetoed} pair(s) ruled out at once (frame, margin or blank page)."
+    )
     return plan
 
 
@@ -226,12 +285,14 @@ def _pages_of(review: list[ReviewPair]) -> set[int]:
     return {page for pair in review for page in (pair.page_start, pair.page_end)}
 
 
-def _review_pair(page_start: int, score: SeamScore, proposed: str) -> ReviewPair:
+def _review_pair(
+    page_start: int, score: SeamScore, evidence: float, proposed: str
+) -> ReviewPair:
     """Wrap a score into a pending decision."""
     return ReviewPair(
         page_start=page_start,
         page_end=page_start + 1,
-        score=score.value,
+        score=probability(evidence),
         vertical_offset=score.vertical_offset,
         proposed=proposed,
         metrics=dict(score.metrics),

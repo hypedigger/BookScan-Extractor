@@ -105,7 +105,7 @@ def test_auto_review_finishes_the_pending_pairs(tmp_path):
     output = tmp_path / "out"
     settings = tmp_path / "settings.json"
     settings.write_text(
-        '{"schema_version": 1, "seam": {"threshold_merge": 0.99, "threshold_split": 0.01}}',
+        '{"schema_version": 1, "seam": {"merge_evidence": 99.0, "split_evidence": -99.0}}',
         encoding="utf-8",
     )
 
@@ -126,7 +126,7 @@ def test_the_sidecar_records_the_decisions(tmp_path):
     _book(source, spreads=2, fly_leaves=1)
     settings = tmp_path / "settings.json"
     settings.write_text(
-        '{"schema_version": 1, "seam": {"threshold_merge": 0.99, "threshold_split": 0.01}}',
+        '{"schema_version": 1, "seam": {"merge_evidence": 99.0, "split_evidence": -99.0}}',
         encoding="utf-8",
     )
     main(

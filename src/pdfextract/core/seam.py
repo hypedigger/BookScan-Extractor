@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from pdfextract.core import spread
 from pdfextract.core.settings import SeamConfig
 
 MERGE = "merge"
@@ -36,10 +37,12 @@ _EPSILON = 1e-6
 class SeamScore:
     """Result of comparing the inner edges of two consecutive pages."""
 
-    value: float  # 0.0 (unrelated) to 1.0 (perfectly continuous)
+    value: float  # probability that the pair is one spread, 0.0 to 1.0
     vertical_offset: int  # best vertical alignment found, in source pixels
     metrics: dict[str, float] = field(default_factory=dict)
     confidence: str = UNCERTAIN
+    evidence: float = 0.0  # log-odds behind ``value``; spread.IMPOSSIBLE when vetoed
+    veto: str | None = None  # why the pair cannot be a spread, when it cannot
 
     @property
     def merges(self) -> bool:
@@ -73,11 +76,11 @@ class _Edge:
     gap: int  # columns skipped between this band and the physical page edge
 
 
-def classify(value: float, config: SeamConfig) -> str:
-    """Turn a score into a decision using the two configured thresholds."""
-    if value >= config.threshold_merge:
+def classify(evidence: float, config: SeamConfig) -> str:
+    """Turn an evidence into a decision using the two configured thresholds."""
+    if evidence >= config.merge_evidence:
         return MERGE
-    if value <= config.threshold_split:
+    if evidence <= config.split_evidence:
         return SPLIT
     return UNCERTAIN
 
@@ -341,37 +344,6 @@ def _metric_edge_continuity(
     return float(np.clip(0.5 * (matched_left + matched_right), 0.0, 1.0))
 
 
-def _ink_ratio(grey: np.ndarray) -> tuple[float, float]:
-    """Return the fraction of non-background pixels and the local variance level."""
-    background = float(np.median(grey))
-    ink = float(np.mean(np.abs(grey.astype(np.float32) - background) > 40.0))
-    variance = float(cv2.Laplacian(grey, cv2.CV_32F).var())
-    return ink, variance
-
-
-def _metric_content_type(left: np.ndarray, right: np.ndarray) -> tuple[float, bool]:
-    """Compare the nature of the two pages.
-
-    A mostly white page carrying text, facing a full page photograph, is very
-    unlikely to be one panorama. Returns the score and whether the mismatch is
-    strong enough to veto the pair.
-    """
-    left_ink, left_variance = _ink_ratio(left)
-    right_ink, right_variance = _ink_ratio(right)
-    score = float(np.clip(1.0 - abs(left_ink - right_ink), 0.0, 1.0))
-
-    def is_photo(ink: float, variance: float) -> bool:
-        return ink > 0.35 and variance > 50.0
-
-    def is_text(ink: float) -> bool:
-        return ink < 0.20
-
-    veto = (is_photo(left_ink, left_variance) and is_text(right_ink)) or (
-        is_text(left_ink) and is_photo(right_ink, right_variance)
-    )
-    return score, veto
-
-
 def _metric_geometry(
     left: _Prepared, right: _Prepared, config: SeamConfig
 ) -> tuple[float, bool]:
@@ -386,25 +358,6 @@ def _metric_geometry(
     score = float(np.clip(1.0 - gap / max(_EPSILON, 4.0 * config.geometry_tolerance), 0.0, 1.0))
     veto = gap > config.geometry_tolerance * 2.0
     return score, veto
-
-
-def _weighted_value(metrics: dict[str, float], config: SeamConfig) -> float:
-    """Combine the available metrics with the configured weights.
-
-    Metrics that could not be computed are simply absent and their weight is
-    redistributed over the others.
-    """
-    total = 0.0
-    weight_sum = 0.0
-    for key, value in metrics.items():
-        weight = config.weights.get(key, 0.0)
-        if weight <= 0.0:
-            continue
-        total += weight * value
-        weight_sum += weight
-    if weight_sum <= 0.0:
-        return 0.0
-    return float(np.clip(total / weight_sum, 0.0, 1.0))
 
 
 def score_seam(left: np.ndarray, right: np.ndarray, config: SeamConfig) -> SeamScore:
@@ -429,12 +382,11 @@ def score_seam(left: np.ndarray, right: np.ndarray, config: SeamConfig) -> SeamS
     activity = max(_activity(left_profile, config), _activity(right_profile, config))
     flat = activity < config.flat_band_threshold
 
-    band_grey = _overlap(left_edge.band_grey, right_edge.band_grey, offset)
-    band_colour = _overlap(left_edge.band_colour, right_edge.band_colour, offset)
     context = _overlap(left_edge.context_grey, right_edge.context_grey, offset)
     lag = left_edge.gap + right_edge.gap
 
     if not flat:
+        band_colour = _overlap(left_edge.band_colour, right_edge.band_colour, offset)
         histogram = _metric_colour_histogram(*band_colour)
         if histogram is not None:
             metrics["colour_histogram"] = histogram
@@ -446,26 +398,31 @@ def score_seam(left: np.ndarray, right: np.ndarray, config: SeamConfig) -> SeamS
         )
         if edges is not None:
             metrics["edge_continuity"] = edges
-    del band_grey
 
-    content, content_veto = _metric_content_type(left_page.grey, right_page.grey)
-    metrics["content_type"] = content
     geometry, geometry_veto = _metric_geometry(left_page, right_page, config)
     metrics["geometry"] = geometry
     metrics["band_activity"] = activity
 
-    value = _weighted_value(
-        {key: item for key, item in metrics.items() if key != "band_activity"}, config
-    )
-    if content_veto or geometry_veto or flat:
-        # A disqualifying metric caps the score whatever the others say.
-        value = min(value, config.veto_cap)
+    # The decision itself: impossible pairs first, then the fitted model.
+    features = spread.pair_features(left, right)
+    features["colour_histogram"] = metrics.get("colour_histogram", 0.0)
+    features["gradient_jump"] = metrics.get("gradient_jump", 0.0)
+    reason = "pages of different sizes" if geometry_veto else spread.veto_reason(features)
+    if reason is not None:
+        evidence = spread.IMPOSSIBLE
         metrics["veto"] = 1.0
+    else:
+        evidence = spread.evidence(features)
+    metrics["evidence"] = evidence
+    for key in ("margin_l", "margin_r", "straight_l", "straight_r", "tone", "texratio_w"):
+        metrics[key] = features[key]
 
     source_offset = int(round(offset / right_page.scale)) if right_page.scale else offset
     return SeamScore(
-        value=value,
+        value=spread.probability(evidence),
         vertical_offset=source_offset,
         metrics={key: float(round(item, 4)) for key, item in metrics.items()},
-        confidence=classify(value, config),
+        confidence=classify(evidence, config),
+        evidence=evidence,
+        veto=reason,
     )

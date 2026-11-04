@@ -11,7 +11,7 @@ Three extraction modes:
 |---|---|---|
 | 1 | Single | One output image per PDF page, no merging. |
 | 2 | Systematic pairing | Every page merged two by two, with the starting offset (fly-leaf, half-title…) detected automatically. |
-| 3 | Smart | Decided pair by pair from a gutter continuity score; ambiguous pairs go to a validation screen. |
+| 3 | Smart | Spreads detected by a model fitted on real scanned books; only the genuinely ambiguous pairs go to a validation screen. |
 
 The engine (`src/pdfextract/core/`) never imports PySide6 and is fully usable from
 the command line. The interface only drives it and reports its progress.
@@ -25,12 +25,12 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 Installs `uv` if needed (it brings its own Python), creates the virtual environment
 and puts a shortcut in the Start Menu.
 
-The shortcut targets `.venv\Scripts\pdfextract-gui.exe`, the launcher declared
-under `[project.gui-scripts]` in `pyproject.toml` and built as a windowed program.
-Neither `run.cmd` nor `pythonw.exe` can be used for this: a `.cmd` file brings its
-own `cmd.exe` window along, and the `pythonw.exe` of a uv virtual environment is a
-trampoline compiled as a console program that starts the console interpreter, so it
-allocates a console whatever its name suggests.
+The shortcut runs `pythonw -m pdfextract` through `.venv\Scripts\pdfextract-launcher.exe`,
+a copy of the windowed launcher shipped with Python (`venvwlauncher.exe`), so no
+console window ever opens. Neither `run.cmd` nor the `pythonw.exe` of the virtual
+environment can be used for this: a `.cmd` file brings its own `cmd.exe` window
+along, and the `pythonw.exe` of a uv virtual environment is a trampoline compiled as
+a console program, so it allocates a console whatever its name suggests.
 
 ## Using it
 
@@ -49,7 +49,7 @@ rebuild.
 ```bash
 uv run pdfextract extract --mode 3 --out out book.pdf
 uv run pdfextract extract --mode 2 --recursive --out out scans/
-uv run pdfextract calibrate book.pdf          # score distribution and suggested thresholds
+uv run pdfextract calibrate book.pdf          # distribution of the spread evidence
 uv run pdfextract info book.pdf
 uv run pdfextract settings --init
 ```
@@ -58,21 +58,40 @@ uv run pdfextract settings --init
 validation queue instead of blocking their file. `--auto-review engine|merge|split`
 decides them without a user, for scripted batches.
 
-## Calibrating the continuity score
+## How spreads are detected
 
-The default thresholds (`threshold_merge` 0.72, `threshold_split` 0.45) are a
-starting point. Calibrate them on real books before relying on mode 3:
+Measured on four real photo books (430 adjacent pairs, 33 spreads), the smart mode
+merges about half of the spreads on its own, asks about almost all the others and
+has merged no pair that was not a spread. The previous, hand-weighted score merged
+none on its own, missed a third of them silently and merged four wrong pairs.
+
+1. **Impossible pairs are ruled out first** (`core/spread.py`): a blank page, a
+   picture that stops on a light margin with a straight edge along the gutter (a
+   framed print, a text block), or a strip of light paper along the gutter. About
+   seven pairs in ten go this way, with no question asked.
+2. **The rest get an evidence**, the log-odds of a small logistic model over gutter
+   features: whether rows, texture, tone and colour carry on across the gutter.
+3. **The parity of the book** corrects it: spreads keep the same facing pages
+   through a book, so once a few likely spreads agree on a parity, pairs on that
+   parity gain evidence and pairs on the other lose a lot of it.
+4. **One arrangement for the whole book** is chosen by a dynamic programme, so no
+   page ends up in two pairs. Pairs at or above `merge_evidence` (4) are merged
+   without a question, which also settles their pages: no question is asked about a
+   pair that would reuse one of them. Between `split_evidence` (-1) and that, the
+   user decides.
+
+All of these values live in *Settings > Continuity* and *Settings > Pairing*. To see
+where a book stands, and to grade the mode on books of your own:
 
 ```bash
 uv run pdfextract calibrate "a real book.pdf" --list-uncertain
 uv run python tools/score_report.py "a real book.pdf" --plate report.jpg
+uv run python tools/evaluate.py my-labels.json --books "D:/books"
 ```
 
-`calibrate` prints the distribution of the scores and proposes thresholds inside the
-gap between the two populations. `score_report.py` prints every metric pair by pair
-and, with `--plate`, writes a contact sheet showing each join next to its score,
-which is the fastest way to see where the scorer is wrong. The weights of the
-individual metrics are editable in *Settings > Continuity*.
+`evaluate.py` takes a JSON file of hand-made labels (kept out of the repository)
+and prints, book by book, the spreads merged, asked about and missed, the wrong
+merges and the number of questions.
 
 ## How the engine works
 
@@ -81,13 +100,12 @@ individual metrics are editable in *Settings > Continuity*.
   no loss, nearly instantaneous. A rotated or mirrored page is decoded and
   reoriented at its source resolution rather than re-rendered at a fixed dpi.
   Anything else falls back to rendering.
-- **Scoring** (`core/seam.py`) compares the inner edges of two consecutive pages on
-  six metrics, ignoring the gutter strip itself, and searches a vertical offset over
-  a few percent of the page height. Two pages whose edges carry no structure at all
-  are split whatever the rest says: that is the case of two facing text pages, whose
-  blank margins otherwise look like a perfect match.
-- **Pairing** (`core/pairing.py`) uses a dynamic programme over the sequence of
-  pages, so no page can end up in two pairs.
+- **Scoring** (`core/seam.py`, `core/spread.py`) compares the inner edges of two
+  consecutive pages, ignoring the gutter strip itself, searches the vertical offset
+  that lines them up, rules out impossible pairs and turns the rest into an
+  evidence (see above).
+- **Pairing** (`core/pairing.py`) applies the parity of the book and a dynamic
+  programme over the sequence of pages, so no page can end up in two pairs.
 - **Naming** is based on the source page number, never on the order files reach the
   disk, because safe pages are written immediately and ambiguous ones only after the
   user has decided. Sorting the output folder always gives the order of the book.
@@ -104,7 +122,8 @@ src/pdfextract/
 ├── core/                  the engine, no Qt anywhere
 │   ├── document.py        opening, page inventory, integrity
 │   ├── extractor.py       native stream extraction, fallback rendering
-│   ├── seam.py            gutter continuity scoring
+│   ├── seam.py            gutter comparison and vertical offset
+│   ├── spread.py          spread vetoes and fitted model
 │   ├── pairing.py         pairing decision, modes 2 and 3
 │   ├── merger.py          merging two half-pages
 │   ├── postprocess.py     deskew, crop, gutter shadow, contrast, resize
