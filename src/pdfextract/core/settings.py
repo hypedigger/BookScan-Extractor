@@ -24,7 +24,7 @@ class ExtractionConfig:
     """How a single PDF page is turned into pixels or into an output file."""
 
     render_dpi: int = 300
-    analysis_dpi: int = 110
+    analysis_height: int = 1100  # pixels; the scorer works at 1000, a little over is enough
     full_page_coverage: float = 0.90
     passthrough_enabled: bool = True
     passthrough_extensions: tuple[str, ...] = ("jpeg", "jpg", "png", "tiff", "tif", "bmp")

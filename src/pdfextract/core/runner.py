@@ -33,6 +33,10 @@ from pdfextract.core.settings import AppSettings
 from pdfextract.core.trash import TrashOutcome, move_to_trash
 
 CancelCheck = Callable[[], bool]
+
+
+class JobCancelled(Exception):  # noqa: N818 - a signal, not an error
+    """Raised inside a job to unwind it as soon as it has been cancelled."""
 JobListener = Callable[["PdfJob"], None]
 
 
@@ -155,6 +159,10 @@ def analyse_and_export(
             job.size_bytes = job.size_bytes or _file_size(job.path)
 
             def scored(done: int, total: int) -> None:
+                # The analysis is the long part of a job, so a cancellation has to be
+                # noticed here, page by page, and not only once it is over.
+                if cancelled is not None and cancelled():
+                    raise JobCancelled
                 job.analysed_pages = min(job.page_count, done + 1)
                 job.progress = (done, total)
                 if progress is not None:
@@ -207,6 +215,11 @@ def analyse_and_export(
                 return job  # the worker is released here, nothing waits for a human
 
             finalise(job, settings, document=document, progress=progress)
+    except JobCancelled:
+        job.state = JobState.CANCELLED
+        logger.info("%s: cancelled", job.path.name)
+        if progress is not None:
+            progress(job)
     except PdfDocumentError as exc:
         job.errors.append(str(exc))
         job.state = JobState.FAILED
@@ -375,8 +388,17 @@ class BatchRunner:
         self._listeners.append(listener)
 
     def _notify(self, job: PdfJob) -> None:
+        """Tell the listeners a job changed.
+
+        A listener belongs to the interface, which can be torn down while a worker
+        is still finishing a page. Whatever goes wrong on that side is logged and
+        swallowed: it must never turn into the failure of the book being processed.
+        """
         for listener in list(self._listeners):
-            listener(job)
+            try:
+                listener(job)
+            except Exception:
+                get_logger().debug("a job listener failed", exc_info=True)
 
     def submit(
         self,
@@ -389,6 +411,8 @@ class BatchRunner:
         created: list[PdfJob] = []
         with self._condition:
             for path in paths:
+                # A file cancelled earlier and submitted again starts afresh.
+                self._cancelled.discard(path)
                 job = PdfJob(
                     path=path, source_root=source_root, mode=mode, force_parity=force_parity
                 )
@@ -418,6 +442,30 @@ class BatchRunner:
                     self._pending.remove(job)
                     job.state = JobState.CANCELLED
                     self._notify(job)
+
+    def forget(self, path: Path) -> list[PdfJob]:
+        """Drop the jobs of a file that are no longer running, and return them.
+
+        A job still running is left alone: cancel it first, then forget it once it
+        has stopped.
+        """
+        with self._condition:
+            dropped = [
+                job for job in self.jobs
+                if job.path == path
+                and (job.is_finished or job.state is JobState.AWAITING_VALIDATION)
+            ]
+            self.jobs = [job for job in self.jobs if job not in dropped]
+        return dropped
+
+    def running(self, path: Path) -> bool:
+        """Return True while a worker is still busy with a file."""
+        return any(
+            job.path == path
+            and not job.is_finished
+            and job.state is not JobState.AWAITING_VALIDATION
+            for job in self.jobs
+        )
 
     def cancel_all(self) -> None:
         """Cancel everything still to do."""

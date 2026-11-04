@@ -49,6 +49,9 @@ STATE_LABELS = {
 
 MODE_CHOICES = ("Global", "1 - single", "2 - systematic", "3 - smart")
 
+# States in which no worker is touching the file, so it can simply be dropped.
+REMOVABLE_STATES = (JobState.PENDING, JobState.AWAITING_VALIDATION)
+
 # What each state actually means. Shown as a tooltip on the cell, because the one
 # word in the column is not enough to tell whether the file still needs anything.
 STATE_HELP = {
@@ -188,6 +191,7 @@ class QueuePanel(QTableWidget):
         self.customContextMenuRequested.connect(self._show_menu)
         self._staged: set[Path] = set()
         self._hidden: set[Path] = set()
+        self._removable: set[Path] = set()
         self.itemChanged.connect(self._on_item_changed)
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802 - Qt naming
@@ -263,6 +267,8 @@ class QueuePanel(QTableWidget):
             return
         self.removeRow(row)
         self._staged.discard(path)
+        self._removable.discard(path)
+        self._hidden.discard(path)
         self._rows = {}
         for index in range(self.rowCount()):
             item = self.item(index, NAME)
@@ -293,8 +299,13 @@ class QueuePanel(QTableWidget):
             self.blockSignals(blocked)
 
     def _on_action(self, path: Path) -> None:
-        """Route the last column to a removal or to a cancellation."""
-        if path in self._staged:
+        """Route the last column to a removal or to a cancellation.
+
+        A file is removed whenever nothing is working on it: not started yet,
+        queued, finished, failed, cancelled, or parked waiting for a decision. Only
+        a file a worker is busy with is cancelled first.
+        """
+        if path in self._staged or path in self._removable:
             self.remove_requested.emit(path)
         else:
             self.cancel_requested.emit(path)
@@ -447,18 +458,25 @@ class QueuePanel(QTableWidget):
             review.setEnabled(bool(pending))
 
         action = self.cellWidget(row, ACTION)
+        removable = staged or job.is_finished or job.state in REMOVABLE_STATES
+        if removable:
+            self._removable.add(job.path)
+        else:
+            self._removable.discard(job.path)
         if isinstance(action, QPushButton):
-            # Nothing to cancel on a file that has not been handed over yet: the
-            # button takes it off the list instead.
-            action.setText("Remove" if staged else "Cancel")
-            action.setEnabled(staged or not job.is_finished)
+            action.setText("Remove" if removable else "Cancel")
+            action.setEnabled(True)
             action.setToolTip(
-                rich_tooltip("Remove", "Take this file off the list. Nothing is deleted.")
-                if staged
+                rich_tooltip(
+                    "Remove",
+                    "Take this file off the list. Nothing is deleted: the PDF and the "
+                    "images already written stay where they are.",
+                )
+                if removable
                 else rich_tooltip(
                     "Cancel",
-                    "Stop processing this file. The images already written stay where "
-                    "they are.",
+                    "Stop processing this file now. The images already written stay "
+                    "where they are; the button then offers to remove it.",
                 )
             )
 

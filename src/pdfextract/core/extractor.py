@@ -145,13 +145,8 @@ def decode_image_bytes(data: bytes) -> np.ndarray | None:
         return None
 
 
-def render_page(page: pymupdf.Page, dpi: int) -> np.ndarray:
-    """Render a page to a BGR array at the requested resolution.
-
-    Rendering always reflects the page as displayed, so ``/Rotate`` and any
-    placement matrix are already applied.
-    """
-    pixmap = page.get_pixmap(dpi=dpi, alpha=False)
+def _to_array(pixmap: pymupdf.Pixmap) -> np.ndarray:
+    """Turn a PyMuPDF pixmap into a BGR array."""
     samples = np.frombuffer(pixmap.samples, dtype=np.uint8)
     array = samples.reshape(pixmap.height, pixmap.width, pixmap.n)
     if pixmap.n == 1:
@@ -159,6 +154,29 @@ def render_page(page: pymupdf.Page, dpi: int) -> np.ndarray:
     if pixmap.n == 4:
         return cv2.cvtColor(array, cv2.COLOR_RGBA2BGR)
     return cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
+
+
+def render_page(page: pymupdf.Page, dpi: int) -> np.ndarray:
+    """Render a page to a BGR array at the requested resolution.
+
+    Rendering always reflects the page as displayed, so ``/Rotate`` and any
+    placement matrix are already applied.
+    """
+    return _to_array(page.get_pixmap(dpi=dpi, alpha=False))
+
+
+def render_to_height(page: pymupdf.Page, height: int) -> np.ndarray:
+    """Render a page to an exact pixel height, whatever its size in points.
+
+    A resolution is the wrong knob for anything that wants a given number of
+    pixels: scanned PDFs often declare one point per scanned pixel, so a page can
+    be three thousand points tall, and 110 dpi of it is a 4,700 pixel render that
+    is thrown away a moment later. A zoom computed from the page height has no
+    such surprise, and no minimum resolution to clamp against either.
+    """
+    page_height = float(page.rect.height) or 1.0
+    zoom = max(1e-3, height / page_height)
+    return _to_array(page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False))
 
 
 def _apply_orientation(
@@ -204,9 +222,7 @@ def render_for_height(page: pymupdf.Page, height: int) -> np.ndarray:
     full resolution scan and then shrinking it, and the screen only ever shows a
     reduced image anyway.
     """
-    page_height = float(page.rect.height) or 1.0
-    dpi = max(12, int(round(72.0 * height / page_height)))
-    return render_page(page, dpi)
+    return render_to_height(page, height)
 
 
 def analysis_array(page: pymupdf.Page, config: ExtractionConfig) -> np.ndarray:
@@ -215,7 +231,7 @@ def analysis_array(page: pymupdf.Page, config: ExtractionConfig) -> np.ndarray:
     The scorer normalises to its own analysis height anyway, so rendering small is
     far cheaper than decoding a full resolution scan.
     """
-    return render_page(page, config.analysis_dpi)
+    return render_to_height(page, config.analysis_height)
 
 
 def output_size(page: pymupdf.Page, config: ExtractionConfig) -> tuple[int, int]:

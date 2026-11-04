@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pdfextract.core import sidecar
 from pdfextract.core.applog import log_path
 from pdfextract.core.job import JobState
 from pdfextract.core.progress import batch_progress, format_duration, tally
@@ -153,6 +154,7 @@ class MainWindow(QMainWindow):
         self._opened_output = False
         self._batch_started: float | None = None
         self._scanner: FolderScanner | None = None
+        self._removed: set[Path] = set()  # files taken off the list by the user
 
         self.setWindowTitle("BookScan Extractor")
         self._palette = palette_for(self.settings.theme)
@@ -526,6 +528,7 @@ class MainWindow(QMainWindow):
         """
         added = 0
         for path in paths:
+            self._removed.discard(path)
             if path in self._staged or any(job.path == path for job in self.runner.jobs):
                 continue
             job = PdfJob(path=path, source_root=source_root)
@@ -581,10 +584,23 @@ class MainWindow(QMainWindow):
         self.panel.rebuild(rows, set(self._staged), checked)
 
     def _remove_staged(self, path: Path) -> None:
-        """Take a file that has not been started off the list."""
+        """Take a file off the list, whatever stage it had reached.
+
+        Nothing is deleted. A queued file is pulled out of the queue, a book waiting
+        for decisions leaves the validation queue and is not reloaded at the next
+        start, and a finished one is simply forgotten.
+        """
+        self._removed.add(path)
         self._staged.pop(path, None)
+        if self.runner.running(path):
+            self.runner.cancel(path)  # a queued file: cancelling pulls it out at once
+        if self.queue.batch_for(path) is not None:
+            self.queue.remove(path)
+        sidecar.forget_pending(path)
+        self.runner.forget(path)
         self.panel.remove_path(path)
         self._refresh_start_action()
+        self._refresh_progress()
         if self.panel.rowCount() == 0:
             self._show_hero()  # an empty list has nothing to say, so offer the start again
 
@@ -607,6 +623,7 @@ class MainWindow(QMainWindow):
 
     def _reprocess(self, path: Path, force_parity: object) -> None:
         """Run a file again, optionally imposing where the mode 2 pairing starts."""
+        self._removed.discard(path)
         existing = next((job for job in self.runner.jobs if job.path == path), None)
         parity = force_parity if isinstance(force_parity, int) else None
         for job in self.runner.submit(
@@ -714,6 +731,10 @@ class MainWindow(QMainWindow):
 
     def _on_job_changed(self, job: PdfJob) -> None:
         """Refresh the row of a job."""
+        if job.path in self._removed:
+            # A worker can report once more after the file was taken off the list;
+            # that report must not bring the row back.
+            return
         self.panel.upsert(job)
         self._refresh_start_action()
         self._refresh_progress()

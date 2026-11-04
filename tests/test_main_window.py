@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QMessageBox
 
 from pdfextract.core.job import JobState
 from pdfextract.ui.main_window import MainWindow
-from pdfextract.ui.queue_panel import NAME, STAGED_LABEL, STATE
+from pdfextract.ui.queue_panel import ACTION, NAME, STAGED_LABEL, STATE
 
 
 def _book(path: Path) -> Path:
@@ -362,3 +362,90 @@ def test_a_failed_file_shows_its_reason_in_the_tooltip(qtbot, window, tmp_path):
     tooltip = window.panel.item(0, STATE).toolTip()
     assert "<b>Failed</b>" in tooltip
     assert "cannot open" in tooltip
+
+
+def _wait_finished(qtbot, window):
+    qtbot.waitUntil(
+        lambda: bool(window.runner.jobs)
+        and all(job.is_finished for job in window.runner.jobs),
+        timeout=60000,
+    )
+
+
+def test_a_finished_file_can_be_taken_off_the_list(qtbot, window, folder):
+    """Once processed, a file used to be stuck in the list for good."""
+    window._stage(sorted(folder.glob("*.pdf"))[:1], source_root=folder)
+    window.start_selected()
+    _wait_finished(qtbot, window)
+
+    action = window.panel.cellWidget(0, ACTION)
+    assert action.text() == "Remove"
+    action.click()
+    assert window.panel.rowCount() == 0
+    assert window.runner.jobs == []
+
+
+def test_a_failed_file_can_be_taken_off_the_list(qtbot, window, tmp_path):
+    broken = tmp_path / "broken.pdf"
+    broken.write_bytes(b"not a pdf")
+    window._stage([broken], source_root=None)
+    window.start_selected()
+    _wait_finished(qtbot, window)
+    window.panel.cellWidget(0, ACTION).click()
+    assert window.panel.rowCount() == 0
+
+
+def test_cancel_then_remove(qtbot, window, tmp_path):
+    """The exact sequence that did not work: cancel a running file, then drop it."""
+    from pdfextract.core.job import JobState
+
+    book = tmp_path / "long.pdf"
+    pages = [make_text_page(seed=900)]
+    for index in range(30):
+        pages += list(spread_pages(seed=2 + index % 5))
+    build_pdf(book, pages, dpi=150)
+    window.settings.mode = 3
+    window._stage([book], source_root=None)
+    window.start_selected()
+    qtbot.waitUntil(
+        lambda: bool(window.runner.jobs)
+        and window.runner.jobs[0].state is JobState.ANALYSING
+        and window.runner.jobs[0].analysed_pages >= 2,
+        timeout=30000,
+    )
+    action = window.panel.cellWidget(0, ACTION)
+    assert action.text() == "Cancel"
+    action.click()
+    qtbot.waitUntil(lambda: window.runner.jobs[0].state is JobState.CANCELLED, timeout=5000)
+    qtbot.waitUntil(lambda: window.panel.cellWidget(0, ACTION).text() == "Remove", timeout=5000)
+
+    window.panel.cellWidget(0, ACTION).click()
+    qtbot.wait(300)  # any late report from the worker must not bring the row back
+    assert window.panel.rowCount() == 0
+
+
+def test_a_book_waiting_for_decisions_can_be_removed_for_good(qtbot, window, folder):
+    """It must leave the validation queue and not come back at the next start."""
+    from pdfextract.core import sidecar
+
+    window.settings.mode = 3
+    window.settings.seam.threshold_merge = 0.99
+    window.settings.seam.threshold_split = 0.01
+    window._stage(sorted(folder.glob("*.pdf"))[:1], source_root=folder)
+    window.start_selected()
+    qtbot.waitUntil(lambda: not window.queue.is_empty(), timeout=60000)
+    path = window.runner.jobs[0].path
+    assert path in sidecar.pending_sources()
+
+    window.panel.cellWidget(0, ACTION).click()
+    assert window.queue.is_empty()
+    assert path not in sidecar.pending_sources()
+    assert window.panel.rowCount() == 0
+
+
+def test_a_removed_file_can_be_added_again(qtbot, window, folder):
+    first = sorted(folder.glob("*.pdf"))[:1]
+    window._stage(first, source_root=folder)
+    window._remove_staged(first[0])
+    window._stage(first, source_root=folder)
+    assert window.panel.rowCount() == 1

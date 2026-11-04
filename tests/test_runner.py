@@ -241,3 +241,84 @@ def test_the_mode_two_parity_can_be_forced_on_a_job(tmp_path):
     forced = PdfJob(path=path, force_parity=0)
     analyse_and_export(forced, settings, queue=ReviewQueue())
     assert forced.plan.items[0].pages == (1, 2)
+
+
+def _long_book(path: Path, spreads: int = 30) -> Path:
+    pages = [make_text_page(seed=900)]
+    for index in range(spreads):
+        left, right = spread_pages(seed=2 + index % 5)
+        pages += [left, right]
+    return build_pdf(path, pages, dpi=150)
+
+
+def test_cancel_stops_a_book_in_the_middle_of_its_analysis(tmp_path):
+    """The analysis is the long part; a cancel that waits for its end is no cancel."""
+    import threading
+    import time as clock
+
+    path = _long_book(tmp_path / "long.pdf")
+    settings = _settings(tmp_path)
+    job = PdfJob(path=path)
+    stop = threading.Event()
+    seen_analysis = threading.Event()
+
+    def progress(current: PdfJob) -> None:
+        if current.analysed_pages >= 3:
+            seen_analysis.set()
+
+    worker = threading.Thread(
+        target=analyse_and_export,
+        args=(job, settings),
+        kwargs={"progress": progress, "cancelled": stop.is_set, "queue": ReviewQueue()},
+    )
+    worker.start()
+    assert seen_analysis.wait(30), "the analysis never started"
+    asked = clock.monotonic()
+    stop.set()
+    worker.join(10)
+
+    assert not worker.is_alive(), "the job ignored the cancellation"
+    assert clock.monotonic() - asked < 2.0
+    assert job.state is JobState.CANCELLED
+    assert job.analysed_pages < job.page_count
+    assert job.written == []  # stopped before writing anything
+
+
+def test_a_cancelled_file_submitted_again_runs(tmp_path):
+    """A cancellation must not stick to the file name for the rest of the session."""
+    path = build_pdf(tmp_path / "book.pdf", [make_text_page(seed=1)])
+    runner = BatchRunner(_settings(tmp_path, mode=1), queue=ReviewQueue(), max_workers=1)
+    runner.cancel(path)
+    runner.submit([path])
+    runner.start()
+    assert runner.wait_until_idle(timeout=30)
+    runner.stop()
+    assert runner.jobs[-1].state is JobState.DONE
+
+
+def test_a_failing_listener_does_not_fail_the_book(tmp_path):
+    """The interface going away mid-run used to mark books as failed."""
+    path = build_pdf(tmp_path / "book.pdf", [make_text_page(seed=1)])
+    runner = BatchRunner(_settings(tmp_path, mode=1), queue=ReviewQueue(), max_workers=1)
+
+    def broken(job: PdfJob) -> None:
+        raise RuntimeError("Signal source has been deleted")
+
+    runner.subscribe(broken)
+    runner.submit([path])
+    runner.start()
+    assert runner.wait_until_idle(timeout=30)
+    runner.stop()
+    assert runner.jobs[0].state is JobState.DONE
+    assert runner.jobs[0].errors == []
+
+
+def test_forget_drops_finished_jobs_only(tmp_path):
+    path = build_pdf(tmp_path / "book.pdf", [make_text_page(seed=1)])
+    runner = BatchRunner(_settings(tmp_path, mode=1), queue=ReviewQueue(), max_workers=1)
+    runner.submit([path])
+    runner.start()
+    assert runner.wait_until_idle(timeout=30)
+    runner.stop()
+    assert len(runner.forget(path)) == 1
+    assert runner.jobs == []
