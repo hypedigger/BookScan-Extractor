@@ -216,3 +216,69 @@ def tally(jobs: Sequence[PdfJob]) -> PlanTally:
             elif pair.decision == DROP_BOTH:
                 dropped += 2
     return PlanTally(single=single, merged=merged, to_check=to_check, dropped=dropped)
+
+
+def _plural(count: int, singular: str, plural: str | None = None) -> str:
+    """Return ``count`` followed by the right form of a noun."""
+    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
+
+
+@dataclass(frozen=True)
+class BatchSummary:
+    """What a finished batch produced, for the screen that closes it."""
+
+    files_done: int
+    files_failed: int
+    files_cancelled: int
+    images: int  # files written to disk, this session or a previous one
+    merged: int  # of which double pages joined back together
+    dropped: int  # pages the user chose not to export
+    elapsed: float | None = None  # seconds, when the batch was timed
+
+    @property
+    def headline(self) -> str:
+        """One line saying how the batch went."""
+        if not self.files_done and (self.files_failed or self.files_cancelled):
+            return "Nothing was extracted"
+        return f"{_plural(self.files_done, 'file')} done"
+
+    @property
+    def detail(self) -> str:
+        """The figures behind the headline, in plain words."""
+        parts: list[str] = []
+        if self.files_done:
+            what = _plural(self.images, "image") + " written"
+            pieces = []
+            if self.merged:
+                pieces.append(f"{_plural(self.merged, 'double page')} joined back together")
+            single = max(0, self.images - self.merged)
+            if self.merged or self.dropped:
+                pieces.insert(0, _plural(single, "single page"))
+            if self.dropped:
+                pieces.append(f"{_plural(self.dropped, 'page')} left out")
+            parts.append(what + (": " + ", ".join(pieces) if pieces else "") + ".")
+        problems = []
+        if self.files_failed:
+            problems.append(f"{_plural(self.files_failed, 'file')} failed")
+        if self.files_cancelled:
+            problems.append(f"{_plural(self.files_cancelled, 'file')} cancelled")
+        if problems:
+            parts.append(", ".join(problems).capitalize() + ".")
+        if self.elapsed is not None and self.elapsed >= 1:
+            parts.append(f"Took {format_duration(self.elapsed)}.")
+        return " ".join(parts)
+
+
+def summarise(jobs: Sequence[PdfJob], elapsed: float | None = None) -> BatchSummary:
+    """Sum up a batch whose files have all finished."""
+    done = [job for job in jobs if job.state is JobState.DONE]
+    counts = tally(done)
+    return BatchSummary(
+        files_done=len(done),
+        files_failed=sum(1 for job in jobs if job.state is JobState.FAILED),
+        files_cancelled=sum(1 for job in jobs if job.state is JobState.CANCELLED),
+        images=sum(len(job.written_paths) for job in done),
+        merged=counts.merged,
+        dropped=counts.dropped,
+        elapsed=elapsed,
+    )

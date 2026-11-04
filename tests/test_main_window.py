@@ -274,6 +274,8 @@ def test_the_tick_row_comes_back_with_the_hidden_files(qtbot, window, folder):
         timeout=60000,
     )
     window._refresh_progress()
+    qtbot.waitUntil(lambda: window.on_hero, timeout=5000)  # the outcome comes first
+    window.hero.result.list_button.click()
     assert window.selection_row.isVisible()
     # It comes back the way the user left it: present, and still unticked.
     assert "0 of 1" in window.staged_label.text()
@@ -449,3 +451,65 @@ def test_a_removed_file_can_be_added_again(qtbot, window, folder):
     window._remove_staged(first[0])
     window._stage(first, source_root=folder)
     assert window.panel.rowCount() == 1
+
+
+# --- the end of a batch -------------------------------------------------------
+
+
+def test_a_finished_batch_comes_back_to_the_landing_screen_with_its_outcome(
+    qtbot, window, folder, no_file_manager
+):
+    window._stage(sorted(folder.glob("*.pdf"))[:2], source_root=folder)
+    window.start_selected()
+    _wait_finished(qtbot, window)
+    qtbot.waitUntil(lambda: window.on_hero, timeout=5000)
+    assert window.hero.showing_result
+    assert "2 files done" in window.hero.result.headline.text()
+    assert "6 images written" in window.hero.result.detail.text()
+    assert "Next book" in window.hero.zone.headline.text()
+
+
+def test_the_file_list_stays_one_click_away(qtbot, window, folder, no_file_manager):
+    window._stage(sorted(folder.glob("*.pdf"))[:1], source_root=folder)
+    window.start_selected()
+    _wait_finished(qtbot, window)
+    qtbot.waitUntil(lambda: window.on_hero, timeout=5000)
+    window.hero.result.list_button.click()
+    assert not window.on_hero
+    assert window.panel.rowCount() == 1
+
+
+def test_the_next_book_starts_on_a_clean_list(qtbot, window, folder, no_file_manager):
+    """After the outcome, new files replace the finished rows, the same file included."""
+    files = sorted(folder.glob("*.pdf"))
+    window._stage(files[:1], source_root=folder)
+    window.start_selected()
+    _wait_finished(qtbot, window)
+    qtbot.waitUntil(lambda: window.on_hero, timeout=5000)
+
+    window._stage(files[:2], source_root=folder)
+    assert not window.on_hero
+    assert window.panel.rowCount() == 2
+    assert window.runner.jobs == []
+    assert not window.hero.showing_result
+
+
+def test_the_outcome_waits_for_the_decisions(qtbot, window, folder, no_file_manager):
+    """A book waiting for the user is not done; deciding its last pair finishes it."""
+    window.settings.mode = 3
+    window.settings.seam.merge_evidence = 99.0
+    window.settings.seam.split_evidence = -99.0
+    window._stage(sorted(folder.glob("*.pdf"))[:1], source_root=folder)
+    window.start_selected()
+    qtbot.waitUntil(lambda: not window.queue.is_empty(), timeout=60000)
+    qtbot.wait(200)
+    assert not window.hero.showing_result
+
+    window.open_review()
+    review = window._review_window
+    while review.current is not None:
+        qtbot.keyClick(review, Qt.Key.Key_1)
+    qtbot.waitUntil(lambda: window.hero.showing_result, timeout=30000)
+    assert window.on_hero
+    assert "1 file done" in window.hero.result.headline.text()
+    assert "double page" in window.hero.result.detail.text()

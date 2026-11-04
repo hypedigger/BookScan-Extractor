@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 from pdfextract.core import sidecar
 from pdfextract.core.applog import log_path
 from pdfextract.core.job import JobState
-from pdfextract.core.progress import batch_progress, format_duration, tally
+from pdfextract.core.progress import batch_progress, format_duration, summarise, tally
 from pdfextract.core.review_queue import ReviewBatch, ReviewQueue
 from pdfextract.core.runner import BatchRunner, PdfJob, record_decision
 from pdfextract.core.settings import AppSettings, load_settings, save_settings
@@ -155,6 +155,8 @@ class MainWindow(QMainWindow):
         self._batch_started: float | None = None
         self._scanner: FolderScanner | None = None
         self._removed: set[Path] = set()  # files taken off the list by the user
+        self._done_shown = False  # the outcome of the current batch is on screen
+        self._review_completed = False  # the last validation session ran to its end
 
         self.setWindowTitle("BookScan Extractor")
         self._palette = palette_for(self.settings.theme)
@@ -232,6 +234,8 @@ class MainWindow(QMainWindow):
         self.hero.folders_chosen.connect(self.scan_folders)
         self.hero.mode_chosen.connect(self._on_hero_mode)
         self.hero.output_chosen.connect(self._on_hero_output)
+        self.hero.open_output_requested.connect(self.open_output)
+        self.hero.list_requested.connect(self._show_queue)
         self.hero.set_output(self.settings.output.root)
         self.hero.set_mode(self.settings.mode)
         self.hero.set_start_directory(self.settings.last_directory)
@@ -526,6 +530,9 @@ class MainWindow(QMainWindow):
         it is always wanted. The files are shown first and only the ticked ones are
         handed to the runner when the batch is started.
         """
+        if self.hero.showing_result:
+            # A new book after a finished batch: the old rows are history.
+            self._clear_finished()
         added = 0
         for path in paths:
             self._removed.discard(path)
@@ -568,6 +575,8 @@ class MainWindow(QMainWindow):
         for path in paths:
             self._staged.pop(path, None)
         self._opened_output = False  # a new batch deserves its own visit to the folder
+        self._done_shown = False
+        self.hero.clear_result()
         self._batch_started = time.monotonic()
         self._progress_timer.start()
         self._refresh_progress()
@@ -602,6 +611,7 @@ class MainWindow(QMainWindow):
         self._refresh_start_action()
         self._refresh_progress()
         if self.panel.rowCount() == 0:
+            self.hero.clear_result()
             self._show_hero()  # an empty list has nothing to say, so offer the start again
 
     def _refresh_start_action(self) -> None:
@@ -694,6 +704,49 @@ class MainWindow(QMainWindow):
         if root.is_dir():
             self.open_folder(root)
 
+    def open_output(self) -> None:
+        """Show the output folder in the file manager."""
+        root = Path(self.settings.output.root or "")
+        if self.settings.output.root and root.is_dir():
+            self.open_folder(root)
+
+    def _maybe_show_done(self) -> None:
+        """Once everything is processed and decided, say so on the landing screen.
+
+        The list of finished rows is a poor ending: the user wants to know what came
+        out and to go on with the next book. The landing screen gives both, with the
+        outcome on top; the list stays one click away.
+        """
+        jobs = self.runner.jobs
+        timed = self._batch_started is not None
+        if self._done_shown or not jobs or not (timed or self._review_completed):
+            return
+        if not all(job.is_finished for job in jobs) or not self.queue.is_empty():
+            return
+        self._done_shown = True
+        started = self._batch_started
+        summary = summarise(jobs, None if started is None else time.monotonic() - started)
+        root = self.settings.output.root
+        self.hero.show_result(summary.headline, summary.detail, f"In {root}" if root else "")
+        self.hero.result.open_button.setVisible(bool(summary.files_done and root))
+        if self._review_window is not None:
+            self._review_window.close()
+        self.statusBar().clearMessage()  # "n file(s) started" is old news by now
+        self._show_hero()
+
+    def _clear_finished(self) -> None:
+        """Take the rows of a finished batch off the list before the next one."""
+        for job in list(self.runner.jobs):
+            if job.is_finished:
+                self.runner.forget(job.path)
+                self.panel.remove_path(job.path)
+        if not self.runner.jobs:
+            self._batch_started = None
+            self._refresh_progress()
+        self._done_shown = False
+        self._review_completed = False
+        self.hero.clear_result()
+
     def open_folder(self, target: Path) -> None:
         """Open a folder in the file manager."""
         if sys.platform == "win32":
@@ -739,6 +792,7 @@ class MainWindow(QMainWindow):
         self._refresh_start_action()
         self._refresh_progress()
         self._maybe_open_output()
+        self._maybe_show_done()
 
     def _refresh_progress(self) -> None:
         """Update the bar at the bottom, its wording and the time left."""
@@ -789,12 +843,13 @@ class MainWindow(QMainWindow):
             self._announce(f"{summary}. Click the button at the bottom left to start.")
         if self._review_window is not None:
             self._review_window.reload_entries()
+        self._maybe_show_done()
 
     def _announce(self, message: str) -> None:
         """Show a discreet banner. Never a modal dialog: the user may be validating."""
         self.notice.setText(message)
         self.notice.setVisible(True)
-        QTimer.singleShot(8000, lambda: self.notice.setVisible(False))
+        QTimer.singleShot(8000, self.notice, self.notice.hide)
 
     # ------------------------------------------------------------------ validation
 
@@ -812,6 +867,7 @@ class MainWindow(QMainWindow):
                 parent=None,
             )
             self._review_window.finished.connect(self._on_review_closed)
+            self._review_window.completed.connect(self._on_review_completed)
         self._review_window.show()
         self._review_window.raise_()
         self._review_window.activateWindow()
@@ -836,6 +892,14 @@ class MainWindow(QMainWindow):
         """Give the processor to the interactive part while the user is validating."""
         if self.settings.review.throttle_background:
             self.runner.throttle(active)
+
+    def _on_review_completed(self, decided: dict) -> None:
+        """Every pair is decided: the books finish writing, then the outcome shows."""
+        self._review_completed = True
+        self.statusBar().showMessage(
+            f"{sum(decided.values())} pair(s) decided; writing the last images…", 6000
+        )
+        self._maybe_show_done()
 
     def _on_review_closed(self) -> None:
         """Forget the validation window once it is closed."""

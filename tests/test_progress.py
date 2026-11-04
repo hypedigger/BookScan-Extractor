@@ -228,3 +228,50 @@ def test_a_book_that_has_not_been_analysed_adds_nothing_to_the_tally():
     from pdfextract.core.progress import tally
 
     assert tally([_job(pages=0)]) .images == 0
+
+
+# --- the outcome of a finished batch ------------------------------------------
+
+from pdfextract.core.job import ExtractionPlan  # noqa: E402
+from pdfextract.core.progress import BatchSummary, summarise  # noqa: E402
+
+
+def _done_book(name: str, singles: int, merged: int) -> PdfJob:
+    items = [PlanItem(page_start=index + 1) for index in range(singles)]
+    items += [
+        PlanItem(page_start=100 + 2 * index, page_end=101 + 2 * index, kind=ItemKind.MERGED)
+        for index in range(merged)
+    ]
+    job = _job(name, state=JobState.DONE, plan=ExtractionPlan(mode=3, items=items))
+    job.written = [
+        WrittenFile(path=Path(f"{name}_{index}.jpg"), item=item, passthrough=True,
+                    reason="native")
+        for index, item in enumerate(items)
+    ]
+    return job
+
+
+def test_the_outcome_counts_files_images_and_spreads():
+    summary = summarise([_done_book("a.pdf", 10, 2), _done_book("b.pdf", 5, 1)], elapsed=125)
+    assert summary == BatchSummary(
+        files_done=2, files_failed=0, files_cancelled=0, images=18, merged=3, dropped=0,
+        elapsed=125,
+    )
+    assert summary.headline == "2 files done"
+    assert summary.detail == (
+        "18 images written: 15 single pages, 3 double pages joined back together. "
+        "Took 2 min."
+    )
+
+
+def test_the_outcome_mentions_what_went_wrong():
+    failed = _job("c.pdf", state=JobState.FAILED)
+    summary = summarise([_done_book("a.pdf", 1, 0), failed])
+    assert summary.headline == "1 file done"
+    assert summary.detail == "1 image written. 1 file failed."
+
+
+def test_nothing_extracted_is_said_plainly():
+    summary = summarise([_job("c.pdf", state=JobState.CANCELLED)])
+    assert summary.headline == "Nothing was extracted"
+    assert summary.detail == "1 file cancelled."

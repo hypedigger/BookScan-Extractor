@@ -171,11 +171,26 @@ def test_the_batch_is_finalised_once_its_last_pair_is_decided(qtbot, window):
     assert len(window.finalised) == 1
 
 
-def test_the_summary_is_shown_when_the_queue_is_empty(qtbot, window):
+def test_the_window_closes_itself_once_everything_is_decided(qtbot, window):
+    """No empty screen with useless buttons: the main window takes over."""
+    reports: list[dict] = []
+    window.completed.connect(reports.append)
     while window.current is not None:
         qtbot.keyClick(window, Qt.Key.Key_2)
-    assert "Nothing left to check" in window.header.text()
-    assert "kept separate" in window.header.text()
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=3000)
+    assert len(reports) == 1
+    assert reports[0][SPLIT] >= 1
+    assert sum(reports[0].values()) == reports[0][SPLIT]
+
+
+def test_a_window_opened_on_nothing_says_so_without_closing(qtbot, tmp_path):
+    widget = ReviewWindow(ReviewQueue(), _settings(tmp_path))
+    qtbot.addWidget(widget)
+    widget.show()
+    assert "Nothing left to check" in widget.header.text()
+    assert not widget.buttons_bar.isVisible()
+    assert widget.isVisible()
+    widget.preloader.stop()
 
 
 def test_moving_to_the_next_book_announces_it(qtbot, tmp_path, prepared):

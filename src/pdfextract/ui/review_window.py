@@ -111,6 +111,10 @@ class ReviewWindow(QMainWindow):
     """The screen that shows one ambiguous pair at a time."""
 
     finished = Signal()
+    # Emitted once the last pending pair has been decided, with the count of each
+    # decision taken during the session. The window then closes itself: an empty
+    # validation screen with five useless buttons has nothing to offer.
+    completed = Signal(dict)
 
     def __init__(
         self,
@@ -135,6 +139,7 @@ class ReviewWindow(QMainWindow):
         self._current_pdf: Path | None = None
         self._pixmaps: dict[PairKey, tuple[QPixmap, QPixmap]] = {}
         self._finalised: set[Path] = set()
+        self._completed = False
 
         self.setWindowTitle("Validation")
         self._build_ui()
@@ -202,6 +207,7 @@ class ReviewWindow(QMainWindow):
         layout.addWidget(pages, 1)
 
         buttons = QWidget(central)
+        self.buttons_bar = buttons
         buttons_layout = QHBoxLayout(buttons)
         buttons_layout.setContentsMargins(10, 6, 10, 8)
         self.back_button = QPushButton("← Undo", buttons)
@@ -334,8 +340,13 @@ class ReviewWindow(QMainWindow):
         """Draw the current pair, pulling it from the cache."""
         entry = self.current
         if entry is None:
-            self._show_summary()
+            if any(self.decided.values()):
+                self._complete()
+            else:
+                self._show_summary()
             return
+        self.buttons_bar.setVisible(True)
+        self.separator.setVisible(True)
 
         if self._current_pdf is not None and entry.pdf_path != self._current_pdf:
             self._show_banner(entry.pdf_path.name)
@@ -406,11 +417,23 @@ class ReviewWindow(QMainWindow):
         """Hide the transition banner."""
         self.banner.setVisible(False)
 
+    def _complete(self) -> None:
+        """Hand the session over to the main window and step out of the way."""
+        if self._completed:
+            return
+        self._completed = True
+        self._show_summary()
+        self.completed.emit(dict(self.decided))
+        # Closing from inside a key press handler is fine, but leaving the event
+        # loop a turn first keeps the handler from running on a closing window.
+        QTimer.singleShot(0, self, self.close)
+
     def _show_summary(self) -> None:
         """Show the end of session recap once the queue is empty."""
         self.left_view.clear()
         self.right_view.clear()
         self.separator.setVisible(False)
+        self.buttons_bar.setVisible(False)
         total = sum(self.decided.values())
         detail = ", ".join(
             f"{count} {DECISION_NAMES[decision]}"

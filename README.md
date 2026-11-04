@@ -40,6 +40,12 @@ stay in the list for later, or can be removed from it. The mode can be set globa
 or overridden file by file, and a right click offers to run a file again, optionally
 imposing where the mode 2 pairing starts.
 
+The validation screen closes by itself once the last pair is decided. When every
+file is processed and decided, the window returns to its start screen with the
+outcome on top (files done, images written, double pages joined, pages left out),
+a button to open the images, the file list one click away, and the drop zone ready
+for the next book or folder.
+
 Update with `update.cmd`, or from *Help > Check for updates* inside the application.
 Both do a `git pull` followed by a dependency sync: there is no frozen executable to
 rebuild.

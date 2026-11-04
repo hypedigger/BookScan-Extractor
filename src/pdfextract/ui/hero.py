@@ -2,7 +2,8 @@
 
 What the application opens on: choose the files, choose how to pair them, say where
 the images go. Once files are in, the window switches to the queue and this screen
-steps out of the way.
+steps out of the way. When a batch is over the window comes back here, with a card
+saying what was done on top and the drop zone ready for the next book.
 """
 
 from __future__ import annotations
@@ -35,6 +36,9 @@ from pdfextract.ui.theme import (
     RADIUS,
     Palette,
 )
+
+DROP_HEADLINE = "Drop your PDF files or a folder here"
+NEXT_HEADLINE = "Next book? Drop another PDF or a folder here"
 
 MODES = (
     (1, "One image per page", "No merging. Every page of the PDF becomes one image."),
@@ -137,7 +141,8 @@ class DropZone(QFrame):
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.headline = QLabel("Drop your PDF files or a folder here", self)
+        self.idle_headline = DROP_HEADLINE
+        self.headline = QLabel(self.idle_headline, self)
         self.headline.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.headline.setStyleSheet(
             f"font-size: {FONT_SIZE + 3}px; font-weight: 600; background: transparent;"
@@ -164,12 +169,21 @@ class DropZone(QFrame):
         self.busy_bar.setFixedSize(220, 6)
         self.busy_bar.setVisible(False)
         self.buttons_row = QWidget(self)
+        self.buttons_row.setObjectName("dropButtons")
+        # A plain widget takes the window background, a dark block inside the zone.
+        self.buttons_row.setStyleSheet("QWidget#dropButtons { background: transparent; }")
         self.buttons_row.setLayout(buttons)
 
         layout.addWidget(self.headline)
         layout.addWidget(hint)
         layout.addWidget(self.buttons_row)
         layout.addWidget(self.busy_bar, 0, Qt.AlignmentFlag.AlignCenter)
+
+    def set_idle_headline(self, text: str) -> None:
+        """Change what the zone says while it waits for a drop."""
+        self.idle_headline = text
+        if not self.busy_bar.isVisible():
+            self.headline.setText(text)
 
     def set_busy(self, text: str) -> None:
         """Show that a folder is being walked."""
@@ -180,7 +194,7 @@ class DropZone(QFrame):
 
     def clear_busy(self) -> None:
         """Go back to inviting a drop."""
-        self.headline.setText("Drop your PDF files or a folder here")
+        self.headline.setText(self.idle_headline)
         self.hint.setVisible(True)
         self.buttons_row.setVisible(True)
         self.busy_bar.setVisible(False)
@@ -215,6 +229,53 @@ class DropZone(QFrame):
             self.dropped.emit(files, folders)
 
 
+class ResultCard(QFrame):
+    """What the last batch did, with the two things one wants to do next."""
+
+    def __init__(self, palette: Palette, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("result")
+        self.setStyleSheet(
+            f"QFrame#result {{ background: {palette.surface_raised};"
+            f" border: 1px solid {palette.success}; border-radius: {RADIUS + 4}px; }}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 16, 22, 16)
+        layout.setSpacing(6)
+
+        self.headline = QLabel("", self)
+        self.headline.setStyleSheet(
+            f"font-size: {FONT_SIZE + 4}px; font-weight: 600; color: {palette.success};"
+            " background: transparent;"
+        )
+        self.detail = QLabel("", self)
+        self.detail.setWordWrap(True)
+        self.detail.setStyleSheet(
+            f"color: {palette.text}; font-size: {FONT_SIZE}px; background: transparent;"
+        )
+        self.where = QLabel("", self)
+        self.where.setWordWrap(True)
+        self.where.setStyleSheet(
+            f"color: {palette.text_muted}; font-size: {FONT_SIZE_SMALL}px;"
+            " background: transparent;"
+        )
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(10)
+        self.open_button = QPushButton("Open the images", self)
+        self.open_button.setProperty("kind", "primary")
+        self.list_button = QPushButton("See the file list", self)
+        buttons.addWidget(self.open_button)
+        buttons.addWidget(self.list_button)
+        buttons.addStretch(1)
+
+        layout.addWidget(self.headline)
+        layout.addWidget(self.detail)
+        layout.addWidget(self.where)
+        layout.addSpacing(4)
+        layout.addLayout(buttons)
+
+
 class HeroPage(QWidget):
     """The screen the application opens on."""
 
@@ -222,6 +283,8 @@ class HeroPage(QWidget):
     folders_chosen = Signal(list)  # folders to walk, on a worker
     mode_chosen = Signal(int)
     output_chosen = Signal(str)
+    open_output_requested = Signal()
+    list_requested = Signal()
 
     def __init__(self, palette: Palette, icon: Path | None = None,
                  parent: QWidget | None = None) -> None:
@@ -243,6 +306,11 @@ class HeroPage(QWidget):
         column.setSpacing(18)
 
         column.addLayout(self._build_header(icon))
+        self.result = ResultCard(palette, self)
+        self.result.open_button.clicked.connect(self.open_output_requested)
+        self.result.list_button.clicked.connect(self.list_requested)
+        self.result.setVisible(False)
+        column.addWidget(self.result)
         self.zone = DropZone(palette, self)
         self.zone.dropped.connect(self._on_dropped)
         self.zone.files_button.clicked.connect(self.choose_files)
@@ -379,6 +447,25 @@ class HeroPage(QWidget):
             self.files_chosen.emit(files, None)
         if folders:
             self.folders_chosen.emit(folders)
+
+    def show_result(self, headline: str, detail: str, where: str = "") -> None:
+        """Put the outcome of the last batch on top, and invite the next one."""
+        self.result.headline.setText(f"✓  {headline}")
+        self.result.detail.setText(detail)
+        self.result.where.setText(where)
+        self.result.where.setVisible(bool(where))
+        self.result.setVisible(True)
+        self.zone.set_idle_headline(NEXT_HEADLINE)
+
+    def clear_result(self) -> None:
+        """Back to a plain landing screen."""
+        self.result.setVisible(False)
+        self.zone.set_idle_headline(DROP_HEADLINE)
+
+    @property
+    def showing_result(self) -> bool:
+        """Return True while the outcome of a batch is on screen."""
+        return not self.result.isHidden()
 
     def set_busy(self, text: str) -> None:
         """Say that a folder is being walked, and keep the eye busy while it is."""
