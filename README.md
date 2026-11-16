@@ -176,6 +176,10 @@ If BookScan Extractor saved your book-digitizing project some pain:
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/hypedigger)
 
+The same link is in the application, under *Help > Support on Ko-fi*. At the tenth
+launch, then every hundredth, a small dialog mentions it once; *Later* sends it away
+and *Don't ask me again* turns it off for good.
+
 ## License
 
 [AGPL-3.0](LICENSE). The engine is built on PyMuPDF, which is itself AGPL v3; this

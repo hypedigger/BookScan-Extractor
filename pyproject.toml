@@ -1,6 +1,6 @@
 [project]
 name = "bookscan-extractor"
-version = "0.1.0"
+version = "0.1.1"
 description = "Extract page images from scanned book PDFs, re-joining double-page spreads."
 readme = "README.md"
 license = "AGPL-3.0-or-later"

@@ -42,6 +42,7 @@ from pdfextract.core.progress import (
 from pdfextract.core.review_queue import ReviewBatch, ReviewQueue
 from pdfextract.core.runner import BatchRunner, PdfJob, record_decision
 from pdfextract.core.settings import AppSettings, load_settings, save_settings
+from pdfextract.ui import support
 from pdfextract.ui.hero import HeroPage, split_drop
 from pdfextract.ui.queue_panel import QueuePanel
 from pdfextract.ui.review_window import ReviewWindow
@@ -495,6 +496,10 @@ class MainWindow(QMainWindow):
         log_action = QAction("Open the log folder", self)
         log_action.triggered.connect(self.open_log_folder)
         help_menu.addAction(log_action)
+        help_menu.addSeparator()
+        support_action = QAction("☕  Support on Ko-fi", self)
+        support_action.triggered.connect(self.open_kofi)
+        help_menu.addAction(support_action)
 
     # -------------------------------------------------------------------- import
 
@@ -1049,6 +1054,20 @@ class MainWindow(QMainWindow):
     def open_log_folder(self) -> None:
         """Open the folder holding the application log."""
         self.open_folder(log_path().parent)
+
+    def open_kofi(self) -> None:
+        """Open the Ko-fi page of the project in the browser."""
+        support.open_kofi()
+
+    def show_support_prompt(self) -> None:
+        """Invite the user to support the project. One click sends it away."""
+        dialog = support.SupportDialog(self)
+        dialog.exec()
+        if dialog.optout_chosen:
+            self.settings.support_optout = True
+            save_settings(self.settings)
+        if dialog.support_chosen:
+            support.open_kofi()
 
     def check_for_updates(self) -> None:
         """Pull the latest version and sync the dependencies, then offer a restart."""

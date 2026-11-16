@@ -1,3 +1,3 @@
 """BookScan Extractor: extract page images from scanned book PDFs."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

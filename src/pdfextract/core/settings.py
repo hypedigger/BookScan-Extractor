@@ -165,6 +165,8 @@ class AppSettings:
     last_directory: str = ""  # where the file choosers open next time
     debug_metrics: bool = False
     max_workers: int = 0  # 0 means cpu_count() - 1
+    usage_count: int = 0  # launches of the graphical interface, for the support prompt
+    support_optout: bool = False  # the user asked not to be prompted for support again
 
     def resolved_postprocess(self) -> PostProcessConfig:
         """Return the active profile, falling back to the inline configuration."""

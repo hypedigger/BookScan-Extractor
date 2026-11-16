@@ -53,6 +53,18 @@ def no_file_manager(monkeypatch) -> list:
 
 
 @pytest.fixture(autouse=True)
+def no_browser(monkeypatch) -> list:
+    """Never let the test suite open a page in the browser.
+
+    The interface links to the Ko-fi page of the project; a test must be able to
+    follow that link without a browser tab appearing on the developer's screen.
+    """
+    opened: list = []
+    monkeypatch.setattr("pdfextract.ui.support.open_kofi", lambda: opened.append("kofi"))
+    return opened
+
+
+@pytest.fixture(autouse=True)
 def isolated_app_data(monkeypatch, tmp_path_factory) -> Path:
     """Keep settings and logs written by the tests out of the real user profile."""
     directory = tmp_path_factory.mktemp("appdata")
